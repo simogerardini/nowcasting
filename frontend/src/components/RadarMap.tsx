@@ -23,12 +23,22 @@ interface Manifest {
   legend: { dbz: number; color: string }[];
 }
 
-const BASEMAP = "https://tiles.openfreemap.org/styles/dark";
-// Used if the vector basemap is unreachable: radar + polygons stay usable.
-const FALLBACK_STYLE: maplibregl.StyleSpecification = {
+// CARTO Voyager raster tiles (lightweight, no style/glyph downloads) - same basemap as tracciatore-gpx
+const BASEMAP_STYLE: maplibregl.StyleSpecification = {
   version: 8,
-  sources: {},
-  layers: [{ id: "bg", type: "background", paint: { "background-color": "#0b1020" } }],
+  sources: {
+    carto: {
+      type: "raster",
+      tiles: ["a", "b", "c", "d"].map((sub) => `https://${sub}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png`),
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/attributions">CARTO</a>',
+    },
+  },
+  layers: [
+    { id: "bg", type: "background", paint: { "background-color": "#e5e7eb" } },
+    { id: "carto", type: "raster", source: "carto" },
+  ],
 };
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 const REFRESH_MS = 60_000;
@@ -44,29 +54,15 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
   const [ready, setReady] = useState(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [idx, setIdx] = useState(0);
-  const [playing, setPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showCap, setShowCap] = useState(true);
   const centred = useRef(false);
 
   // ---------------------------------------------------------------- map init
   useEffect(() => {
     if (!container.current || map.current) return;
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 6000);
-    let m: MlMap | null = null;
-    let cancelled = false;
-    fetch(BASEMAP, { signal: ctl.signal })
-      .then((r) => (r.ok ? (r.json() as Promise<maplibregl.StyleSpecification>) : FALLBACK_STYLE))
-      .catch(() => FALLBACK_STYLE)
-      .then((style) => {
-        clearTimeout(timer);
-        if (cancelled || !container.current) return;
-        m = initMap(container.current, style);
-      });
+    const m = initMap(container.current, BASEMAP_STYLE);
     return () => {
-      cancelled = true;
-      m?.remove();
+      m.remove();
       map.current = null;
     };
   }, []);
@@ -195,18 +191,14 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     m.setFilter("risk-line", filter);
   }, [ready, manifest, frame]);
 
-  useEffect(() => {
-    const m = map.current;
-    if (!ready || !m) return;
-    for (const id of ["cap-fill", "cap-line"]) m.setLayoutProperty(id, "visibility", showCap ? "visible" : "none");
-  }, [ready, showCap]);
-
   // ---------------------------------------------------------------- animation
   useEffect(() => {
-    if (!playing || !manifest) return;
-    const t = setInterval(() => setIdx((i) => (i + 1) % manifest.frames.length), 600);
-    return () => clearInterval(t);
-  }, [playing, manifest]);
+    // Continuous loop; pause 1.5 s on the last forecast frame before restarting
+    if (!manifest) return;
+    const n = manifest.frames.length;
+    const t = setTimeout(() => setIdx((i) => (i + 1) % n), idx === n - 1 ? 1500 : 700);
+    return () => clearTimeout(t);
+  }, [manifest, idx]);
 
   // ---------------------------------------------------------------- user position
   useEffect(() => {
@@ -224,21 +216,6 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     }
   }, [ready, position, focus]);
 
-  const ticks = useMemo(() => {
-    const fr = manifest?.frames ?? [];
-    if (fr.length < 2) return [];
-    const pos = (off: number) => {
-      const i = fr.findIndex((f) => f.offset_min >= off);
-      return i < 0 ? null : (i / (fr.length - 1)) * 100;
-    };
-    return [
-      { label: `${fr[0].offset_min}m`, pct: 0 },
-      { label: "ora", pct: pos(0) },
-      { label: "+30m", pct: pos(30) },
-      { label: "+60m", pct: 100 },
-    ].filter((t): t is { label: string; pct: number } => t.pct !== null);
-  }, [manifest]);
-
   const label = useMemo(() => {
     if (!frame) return "—";
     const sign = frame.offset_min > 0 ? "+" : "";
@@ -249,59 +226,24 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     <div className="relative h-full w-full">
       <div ref={container} className="h-full w-full" />
       {error && (
-        <div className="absolute inset-x-2 bottom-40 z-10 mx-auto max-w-md rounded-lg bg-red-900/90 px-3 py-2 text-center text-sm sm:bottom-44">
+        <div className="absolute inset-x-2 bottom-20 z-10 mx-auto max-w-md rounded-lg bg-red-900/90 px-3 py-2 text-center text-sm">
           {error}
         </div>
       )}
-      <div className="absolute inset-x-2 bottom-2 rounded-2xl bg-night-900/85 p-3 shadow-xl backdrop-blur sm:inset-x-auto sm:left-1/2 sm:w-[560px] sm:-translate-x-1/2">
-        <div className="mb-2 flex items-center justify-between text-sm">
-          <button
-            onClick={() => setPlaying((p) => !p)}
-            className="rounded-full bg-sky-600 px-3 py-1 font-semibold hover:bg-sky-500"
-            aria-label={playing ? "Pausa" : "Riproduci"}
-          >
-            {playing ? "❚❚" : "▶"}
-          </button>
-          <span className={`font-mono ${frame?.kind === "forecast" ? "text-amber-300" : "text-sky-200"}`}>
-            {frame?.kind === "forecast" ? "Previsione " : "Osservato "}
+      {frame && (
+        <div className="pointer-events-none absolute bottom-8 left-1/2 z-10 -translate-x-1/2 rounded-full bg-night-900/85 px-4 py-1.5 text-sm shadow-lg backdrop-blur">
+          <span className={`font-mono ${frame.kind === "forecast" ? "text-amber-300" : "text-sky-200"}`}>
+            {frame.kind === "forecast" ? "Previsione " : "Radar "}
             {label}
           </span>
-          <label className="flex items-center gap-1 text-xs text-slate-300">
-            <input type="checkbox" checked={showCap} onChange={(e) => setShowCap(e.target.checked)} />
-            Allerte
-          </label>
+          <span className="ml-2 inline-flex h-1.5 w-16 overflow-hidden rounded-full bg-slate-700 align-middle">
+            <span
+              className="h-full bg-sky-400 transition-all"
+              style={{ width: `${((idx + 1) / (manifest?.frames.length ?? 1)) * 100}%` }}
+            />
+          </span>
         </div>
-        <input
-          type="range"
-          min={0}
-          max={Math.max(0, (manifest?.frames.length ?? 1) - 1)}
-          value={idx}
-          onChange={(e) => {
-            setPlaying(false);
-            setIdx(Number(e.target.value));
-          }}
-          className="w-full accent-sky-500"
-          aria-label="Timeline radar"
-        />
-        <div className="relative mt-1 h-3 text-[10px] text-slate-400">
-          {ticks.map((t) => (
-            <span key={t.label} className="absolute -translate-x-1/2" style={{ left: `${t.pct}%` }}>
-              {t.label}
-            </span>
-          ))}
-        </div>
-        {manifest && (
-          <div className="mt-2 flex items-center gap-[2px]">
-            {manifest.legend.map((l) => (
-              <div key={l.dbz} className="flex-1 text-center text-[9px] text-slate-300">
-                <div className="h-2 rounded-sm" style={{ background: l.color }} />
-                {l.dbz}
-              </div>
-            ))}
-            <span className="ml-1 text-[9px] text-slate-400">dBZ</span>
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }

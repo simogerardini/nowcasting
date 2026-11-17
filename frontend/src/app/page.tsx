@@ -55,7 +55,7 @@ export default function Home() {
       <IosInstallBanner />
       <header className="pointer-events-none absolute left-3 top-3 z-10 rounded-xl bg-night-900/80 px-3 py-2 backdrop-blur">
         <h1 className="text-sm font-bold tracking-wide">⛈️ Noctalix Nowcast</h1>
-        <p className="text-[11px] text-slate-400">Radar DPC · previsione +60 min</p>
+        <p className="text-[11px] text-slate-400">Radar Italia · previsione +60 min</p>
       </header>
       {position && alerts && (
         <section className="absolute left-3 top-20 z-10 max-w-[70vw] rounded-xl bg-night-900/85 px-3 py-2 text-xs backdrop-blur sm:max-w-xs">
