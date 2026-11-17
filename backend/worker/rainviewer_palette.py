@@ -299,12 +299,20 @@ def decode_with_snow(rgba: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     idx_c = np.clip(idx, 0, len(KEYS) - 1)
     exact = KEYS[idx_c] == uniq
     lut = np.where(exact, VALS[idx_c], np.nan).astype(np.float32)
-    if (~exact).any():  # antialiased/unknown colours -> nearest palette colour (RGB distance)
+    if (~exact).any():  # unknown colours (rare in rain-only tiles) -> nearest palette colour, capped at 50 dBZ
+        # so an undocumented colour can never by itself trigger a hail alert
         miss = np.where(~exact)[0]
         rgb = np.stack([(uniq[miss] >> 24) & 255, (uniq[miss] >> 16) & 255, (uniq[miss] >> 8) & 255], axis=1).astype(np.int32)
         d = ((rgb[:, None, :] - _RGB[None, :, :]) ** 2).sum(-1)
-        lut[miss] = VALS[d.argmin(1)]
+        lut[miss] = np.minimum(VALS[d.argmin(1)], 50.0)
     out[opaque] = lut[inv]
     snow = np.zeros(packed.shape, dtype=bool)
     snow[opaque] = np.isin(uniq, SNOW_KEYS)[inv]
     return out.reshape(h, w), snow.reshape(h, w)
+
+
+def snow_mask(rgba: np.ndarray) -> np.ndarray:
+    """Pixels drawn with an exact snow-palette colour (snow=1 tiles). Mixed-phase pink is NOT snow."""
+    flat = rgba.reshape(-1, 4).astype(np.uint32)
+    packed = (flat[:, 0] << 24) | (flat[:, 1] << 16) | (flat[:, 2] << 8) | flat[:, 3]
+    return np.isin(packed, SNOW_KEYS).reshape(rgba.shape[:2])

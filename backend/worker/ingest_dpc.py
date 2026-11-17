@@ -17,7 +17,7 @@ from rasterio.transform import Affine, from_bounds
 
 from app.config import get_settings
 
-from .rainviewer_palette import decode_with_snow
+from .rainviewer_palette import decode_with_snow, snow_mask
 
 log = logging.getLogger("ingest")
 settings = get_settings()
@@ -138,6 +138,7 @@ def _tile_bounds_merc(x: int, y: int, z: int) -> tuple[float, float, float, floa
 
 
 _RV_CACHE: dict[str, RadarFrame] = {}  # frame path -> decoded frame (frames are immutable)
+LAST_DPC_ERROR: str | None = None
 
 
 class RainViewerClient:
@@ -173,21 +174,26 @@ class RainViewerClient:
         out = np.full((ny * 256, nx * 256), np.nan, dtype="float32")
         snow = np.zeros(out.shape, dtype=bool)
 
-        def get(tx: int, ty: int):
-            r = self.c.get(f"{host}{p['path']}/256/{self.z}/{tx}/{ty}/2/0_1.png")  # scheme 2, snow=1
-            return tx, ty, (r.content if r.status_code == 200 else None)
+        def get(tx: int, ty: int, snow_opt: int):
+            r = self.c.get(f"{host}{p['path']}/256/{self.z}/{tx}/{ty}/2/0_{snow_opt}.png")
+            return tx, ty, snow_opt, (r.content if r.status_code == 200 else None)
 
+        jobs = [(tx, ty, so) for ty in range(y0, y1 + 1) for tx in range(x0, x1 + 1) for so in (0, 1)]
         with ThreadPoolExecutor(max_workers=6) as ex:
-            tiles = list(ex.map(lambda xy: get(*xy), [(tx, ty) for ty in range(y0, y1 + 1) for tx in range(x0, x1 + 1)]))
-        for tx, ty, content in tiles:
+            tiles = list(ex.map(lambda j: get(*j), jobs))
+        for tx, ty, snow_opt, content in tiles:
             if content is None:
                 continue
             img = np.asarray(Image.open(io.BytesIO(content)).convert("RGBA"))
             oy, ox = (ty - y0) * 256, (tx - x0) * 256
-            # transparent = no echo: inside the mosaic that is "dry" (-inf), not missing data
-            dbz, sn = decode_with_snow(img)
-            out[oy:oy + 256, ox:ox + 256] = np.nan_to_num(dbz, nan=-np.inf)
-            snow[oy:oy + 256, ox:ox + 256] = sn
+            if snow_opt == 0:
+                # intensity from the rain-only rendering: every colour is in the official table
+                # (snow=1 tiles add undocumented pink "mixed" colours that would decode as hail).
+                # transparent = no echo: inside the mosaic that is "dry" (-inf), not missing data
+                dbz, _ = decode_with_snow(img)
+                out[oy:oy + 256, ox:ox + 256] = np.nan_to_num(dbz, nan=-np.inf)
+            else:
+                snow[oy:oy + 256, ox:ox + 256] = snow_mask(img)
         left, _, _, top = _tile_bounds_merc(x0, y0, self.z)
         _, bottom, right, _ = _tile_bounds_merc(x1, y1, self.z)
         transform = from_bounds(left, bottom, right, top, out.shape[1], out.shape[0])
@@ -231,18 +237,67 @@ def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = Non
     return RadarFrame(f.time, arr, tr, f.crs, f.source, snow)
 
 
+# ------------------------------------------------------------------ quality control
+def remove_static_clutter(frames: list[RadarFrame], strong: float = 40.0, persist: int = 4,
+                          context_max: float = 25.0, win: int = 11) -> list[RadarFrame]:
+    """Remove ground clutter / mountain artefacts: strong echoes that stay on the SAME pixels in most
+    frames (real storms move) while their surroundings are weak (real cores sit inside rain >= ~25 dBZ).
+    Affected pixels are replaced by the local background level."""
+    from scipy import ndimage
+
+    if len(frames) < 3:
+        return frames
+    stack = np.stack([f.dbz for f in frames])
+    strong_count = (np.nan_to_num(stack, nan=-np.inf) >= strong).sum(axis=0)
+    candidate = strong_count >= min(persist, len(frames) - 1)
+    if not candidate.any():
+        return frames
+    out = []
+    removed = 0
+    for f in frames:
+        d = np.nan_to_num(f.dbz, nan=-np.inf, neginf=-np.inf)
+        base = np.where(np.isfinite(d), np.clip(d, 0, None), 0.0).astype("float32")
+        context = ndimage.median_filter(base, size=win, mode="nearest")
+        bad = candidate & (d >= strong) & (context < context_max)
+        if bad.any():
+            # grow by 1 px to catch the halo of the artefact
+            bad = ndimage.binary_dilation(bad, iterations=1) & (d > context)
+            new = f.dbz.copy()
+            new[bad] = np.where(context[bad] >= settings.min_dbz, context[bad], -np.inf)
+            removed += int(bad.sum())
+            out.append(RadarFrame(f.time, new, f.transform, f.crs, f.source, f.snow))
+        else:
+            out.append(f)
+    if removed:
+        log.info("Clutter filter: removed %d pixels (static strong echoes in weak context)", removed)
+    return out
+
+
+def clamp_reflectivity(f: RadarFrame, max_dbz: float = 70.0) -> RadarFrame:
+    d = f.dbz.copy()
+    d[np.isfinite(d) & (d > max_dbz)] = max_dbz
+    return RadarFrame(f.time, d, f.transform, f.crs, f.source, f.snow)
+
+
+def quality_control(frames: list[RadarFrame]) -> list[RadarFrame]:
+    return remove_static_clutter([clamp_reflectivity(f) for f in frames])
+
+
 # ------------------------------------------------------------------ public API
 def fetch_latest_frames(n: int | None = None) -> list[RadarFrame]:
     """Last n consecutive frames, oldest first. DPC primary, RainViewer fallback."""
+    global LAST_DPC_ERROR
     n = n or settings.n_input_frames
     with httpx.Client(timeout=30, headers=UA, follow_redirects=True) as c:
         try:
-            frames = [crop_and_downsample(f) for f in DPCClient(c).last_frames(n)]
+            frames = quality_control([crop_and_downsample(f) for f in DPCClient(c).last_frames(n)])
+            LAST_DPC_ERROR = None
             log.info("DPC: %d frames, latest %s, grid %s", len(frames), frames[-1].time, frames[-1].dbz.shape)
             return frames
         except Exception as exc:  # noqa: BLE001
+            LAST_DPC_ERROR = f"{type(exc).__name__}: {exc}"[:300]
             log.warning("DPC ingest failed (%s); falling back to RainViewer", exc)
-        frames = [crop_and_downsample(f) for f in RainViewerClient(c).last_frames(n)]
+        frames = quality_control([crop_and_downsample(f) for f in RainViewerClient(c).last_frames(n)])
         log.info("RainViewer: %d frames, latest %s, grid %s", len(frames), frames[-1].time, frames[-1].dbz.shape)
         return frames
 

@@ -7,10 +7,10 @@ export interface EventSpec {
 }
 
 export const RADAR_EVENTS: EventSpec[] = [
-  { id: "RAIN_START", label: "Inizio pioggia", hint: "Avviso quando sta per iniziare a piovere dove sei", color: "#38bdf8" },
-  { id: "HEAVY_RAIN", label: "Pioggia forte / rovescio", hint: "≥ 35 dBZ, circa 5–20 mm/h", color: "#facc15" },
-  { id: "CLOUDBURST", label: "Temporale forte / nubifragio", hint: "≥ 45 dBZ, oltre 20 mm/h", color: "#f97316" },
-  { id: "HAIL", label: "Grandine / downburst probabile", hint: "≥ 55 dBZ, celle molto intense", color: "#dc2626" },
+  { id: "RAIN_START", label: "Inizio pioggia", hint: "Anche pioggia debole (≥ 15 dBZ): avviso prima che inizi, o appena inizia", color: "#38bdf8" },
+  { id: "HEAVY_RAIN", label: "Pioggia forte / rovescio", hint: "≥ 35 dBZ, circa 5–20 mm/h · fino a 60 min prima", color: "#facc15" },
+  { id: "CLOUDBURST", label: "Temporale forte / nubifragio", hint: "≥ 45 dBZ, oltre 20 mm/h · fino a 45 min prima", color: "#f97316" },
+  { id: "HAIL", label: "Grandine / downburst probabile", hint: "≥ 55 dBZ, celle molto intense · fino a 30 min prima", color: "#dc2626" },
   { id: "SNOW", label: "Neve", hint: "Inizio nevicata (dove il radar distingue la neve)", color: "#e0f2fe" },
 ];
 

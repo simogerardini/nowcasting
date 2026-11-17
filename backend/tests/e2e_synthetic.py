@@ -51,10 +51,39 @@ async def main():
         n2 = await notifier.notify_radar(s, r, run)
     print("dedup second pass sent:", n2)
     assert n2 == 0
+    # --- onset alerts: forecast (dry now, rain coming) and observed (dry previous run, raining now)
+    from datetime import timedelta
+    await r.flushdb()
+    t1 = frames[-1].time + timedelta(minutes=10)
+    run1 = synthetic_frames(shape=(300, 400), x0=85, t0=t1 - timedelta(minutes=25))
+    run2 = synthetic_frames(shape=(300, 400), x0=100, t0=t1 + timedelta(minutes=10) - timedelta(minutes=25))
+    async with SessionLocal() as s:
+        await s.execute(text("""INSERT INTO user_subscriptions (endpoint,p256dh,auth,location,alert_types)
+            VALUES ('https://push.example/onset-fc','pkey-xxxxxxxxxxxx','auth-xxxx',
+                    ST_SetSRID(ST_MakePoint(10.75,44.5),4326),'{RAIN_START}')"""))
+        await s.commit()
+    sent_to.clear()
+    pipeline.fetch_latest_frames = lambda: run1
+    await pipeline.run_cycle(r, Storage())
+    fc_titles = [t for e, t in sent_to if e.endswith("onset-fc")]
+    async with SessionLocal() as s:  # user B subscribes after run 1
+        await s.execute(text("""INSERT INTO user_subscriptions (endpoint,p256dh,auth,location,alert_types)
+            VALUES ('https://push.example/onset-obs','pkey-xxxxxxxxxxxx','auth-xxxx',
+                    ST_SetSRID(ST_MakePoint(10.47,44.5),4326),'{RAIN_START}')"""))
+        await s.commit()
+    sent_to.clear()
+    pipeline.fetch_latest_frames = lambda: run2
+    await r.delete("nowcast:last_run")
+    await pipeline.run_cycle(r, Storage())
+    obs_titles = [t for e, t in sent_to if e.endswith("onset-obs")]
+    print("onset forecast:", fc_titles, "| onset observed:", obs_titles)
+    assert fc_titles and "arrivo" in fc_titles[0]
+    assert obs_titles and "Inizia a piovere" in obs_titles[0]
+
     async with SessionLocal() as s:
         await s.execute(text("DELETE FROM user_subscriptions WHERE endpoint LIKE 'https://push.example/%'"))
-        await s.execute(text("DELETE FROM forecast_polygons WHERE run_timestamp=:r"), {"r": run})
-        await s.execute(text("DELETE FROM pipeline_runs WHERE run_timestamp=:r"), {"r": run})
+        await s.execute(text("DELETE FROM forecast_polygons"))
+        await s.execute(text("DELETE FROM pipeline_runs"))
         await s.commit()
     await r.flushdb()
     print("E2E OK")

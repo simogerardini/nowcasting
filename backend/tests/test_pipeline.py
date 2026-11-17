@@ -12,14 +12,14 @@ from worker.nowcast_engine import dbz_to_rain, rain_to_dbz, run_nowcast
 from worker.vectorizer import MercatorWarper, buffer_km, png_bytes, vectorize
 
 
-def synthetic_frames(n=6, shape=(300, 400), speed=3):
+def synthetic_frames(n=6, shape=(300, 400), speed=3, x0=100, t0=None):
     """Gaussian convective cell (peak 60 dBZ) drifting east `speed` px / 5 min over N Italy."""
-    t0 = datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc)
+    t0 = t0 or datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc)
     tr = from_origin(9.0, 46.0, 0.01, 0.01)
     yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
     frames = []
     for i in range(n):
-        cx, cy = 100 + i * speed, 150
+        cx, cy = x0 + i * speed, 150
         d2 = (xx - cx) ** 2 + (yy - cy) ** 2
         dbz = 10 + 50 * np.exp(-d2 / (2 * 18 ** 2))
         dbz += np.random.default_rng(i).normal(0, 0.5, shape)
@@ -125,3 +125,15 @@ def test_cap_event_mapping_and_regions():
     assert cap_event_type("Red High-Temperature Warning") == "CAP_HEAT"
     g = region_geometry("Emilia e Romagna")
     assert g is not None and g.contains(__import__("shapely.geometry", fromlist=["Point"]).Point(11.34, 44.49))
+
+
+def test_rainviewer_unknown_colours_never_hail():
+    from worker.rainviewer_palette import decode, snow_mask
+    img = np.zeros((2, 2, 4), dtype=np.uint8)
+    img[0, 0] = (255, 178, 201, 255)   # undocumented pink (mixed precipitation in snow=1 tiles)
+    img[0, 1] = (0x88, 0xdd, 0xee, 0xff)  # 15 dBZ rain colour
+    img[1, 0] = (0xbf, 0xff, 0xff, 0xff)  # 10 dBZ snow colour
+    d = decode(img)
+    assert d[0, 0] <= 50 and abs(d[0, 1] - 15) < 0.5 and np.isnan(d[1, 1])
+    m = snow_mask(img)
+    assert m[1, 0] and not m[0, 0] and not m[0, 1]

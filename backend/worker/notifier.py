@@ -25,7 +25,7 @@ RANK = sql_rank("f.severity_level")
 # - one notification per user per run: most severe event first, then most imminent
 # - dedup: same event within its window (RAIN_START / SNOW 120 min, others 45 min), and within 45 min
 #   anything not more severe than what was already sent (only upgrades get through)
-# - onset events (RAIN_START, SNOW) only if it is not already raining/snowing at the user (lead-0 polygons)
+# - onset events (RAIN_START, SNOW): forecast only if dry now; or observed now after a dry previous run
 MATCH_SQL = text(f"""
 SELECT DISTINCT ON (u.id)
     u.id AS user_id, u.endpoint, u.p256dh, u.auth,
@@ -34,12 +34,22 @@ SELECT DISTINCT ON (u.id)
 FROM user_subscriptions u
 JOIN forecast_polygons f ON ST_Intersects(u.location, f.geom)
 WHERE f.run_timestamp = :current_run
-  AND f.lead_time_minutes > 0
   AND f.event_type = ANY(u.alert_types)
-  AND (f.event_type NOT IN ('RAIN_START', 'SNOW') OR NOT EXISTS (
-        SELECT 1 FROM forecast_polygons o
-        WHERE o.run_timestamp = :current_run AND o.lead_time_minutes = 0
-          AND o.event_type = f.event_type AND ST_Intersects(u.location, o.geom)))
+  AND (
+    -- forecast: rain/snow arriving at a place that is dry now (onset) or any intense event
+    (f.lead_time_minutes > 0
+     AND (f.event_type NOT IN ('RAIN_START', 'SNOW') OR NOT EXISTS (
+            SELECT 1 FROM forecast_polygons o
+            WHERE o.run_timestamp = :current_run AND o.lead_time_minutes = 0
+              AND o.event_type = f.event_type AND ST_Intersects(u.location, o.geom))))
+    -- observed onset: raining/snowing now, dry in the previous radar run (covers data latency)
+    OR (f.lead_time_minutes = 0 AND f.event_type IN ('RAIN_START', 'SNOW') AND NOT EXISTS (
+            SELECT 1 FROM forecast_polygons o
+            WHERE o.run_timestamp = (SELECT max(run_timestamp) FROM forecast_polygons
+                                     WHERE run_timestamp < :current_run)
+              AND o.lead_time_minutes = 0
+              AND o.event_type = f.event_type AND ST_Intersects(u.location, o.geom)))
+  )
   AND NOT EXISTS (
       SELECT 1 FROM alert_history ah
       WHERE ah.subscription_id = u.id AND ah.source = 'RADAR'
@@ -106,6 +116,15 @@ def build_radar_payload(row, run_time: datetime) -> dict:
     sev = row["severity_level"]
     eta = (run_time + timedelta(minutes=lead)).astimezone(ZoneInfo(row["timezone"] or "Europe/Rome"))
     rain = row["estimated_rain_mmh"]
+    if lead == 0:
+        title = {"RAIN_START": "🌧️ Inizia a piovere", "SNOW": "❄️ Inizia a nevicare"}.get(ev, spec["title"])
+        body = {"RAIN_START": "Il radar rileva pioggia sulla tua posizione adesso.",
+                "SNOW": "Il radar rileva neve sulla tua posizione adesso."}.get(ev, "") + " Tocca per aprire il radar."
+        return {
+            "title": title, "body": body, "icon": "/icons/storm-alert.png", "badge": "/icons/badge.png",
+            "tag": f"nowcast-{ev}", "renotify": False,
+            "data": {"url": f"{settings.frontend_url}/?focus=alert", "severity": sev, "event": ev, "lead": 0},
+        }
     title = f"{spec['title']} tra ~{lead} min"
     body = {
         "RAIN_START": f"Inizio pioggia previsto sulla tua posizione verso le {eta:%H:%M}.",

@@ -53,7 +53,9 @@ async def radar_tick(redis, storage: Storage, force: bool = False) -> None:
     write_status(last_attempt=datetime.now(timezone.utc).isoformat())
     try:
         run = await run_cycle(redis, storage)
-        write_status(last_ok=datetime.now(timezone.utc).isoformat(), last_run=run, last_error=None)
+        from . import ingest_dpc
+        write_status(last_ok=datetime.now(timezone.utc).isoformat(), last_run=run, last_error=None,
+                     dpc_error=ingest_dpc.LAST_DPC_ERROR)
     except Exception as exc:  # noqa: BLE001
         log.exception("Radar cycle failed")
         write_status(last_error=f"{type(exc).__name__}: {exc}"[:500],

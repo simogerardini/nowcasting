@@ -5,17 +5,19 @@ import re
 
 SEVERITY_RANK = {"INFO": 0, "MODERATE": 1, "SEVERE": 2, "EXTREME": 3}
 
-# Radar nowcast events (0-60 min). threshold = reflectivity (dBZ) contour that is vectorized.
+# Radar nowcast events (0-60 min). dbz = reflectivity contour that is vectorized; max_lead = longest lead time
+# (min) at which the event is forecast at all: convective cores lose predictability fast (S-PROG skill),
+# so hail / cloudburst are only forecast where the nowcast is still reliable.
 RADAR_EVENTS: dict[str, dict] = {
-    "RAIN_START": {"dbz": 20, "severity": "INFO", "dedup_min": 120,
+    "RAIN_START": {"dbz": 15, "severity": "INFO", "dedup_min": 120, "max_lead": 60,
                    "label": "Inizio pioggia", "title": "🌂 Pioggia in arrivo"},
-    "HEAVY_RAIN": {"dbz": 35, "severity": "MODERATE", "dedup_min": 45,
+    "HEAVY_RAIN": {"dbz": 35, "severity": "MODERATE", "dedup_min": 45, "max_lead": 60,
                    "label": "Pioggia forte / rovescio", "title": "🌧️ Rovescio intenso"},
-    "CLOUDBURST": {"dbz": 45, "severity": "SEVERE", "dedup_min": 45,
+    "CLOUDBURST": {"dbz": 45, "severity": "SEVERE", "dedup_min": 45, "max_lead": 45,
                    "label": "Temporale forte / nubifragio", "title": "⚠️ Temporale forte"},
-    "HAIL": {"dbz": 55, "severity": "EXTREME", "dedup_min": 45,
+    "HAIL": {"dbz": 55, "severity": "EXTREME", "dedup_min": 45, "max_lead": 30,
              "label": "Grandine / downburst probabile", "title": "🚨 Possibile grandine"},
-    "SNOW": {"dbz": 15, "severity": "MODERATE", "dedup_min": 120,
+    "SNOW": {"dbz": 15, "severity": "MODERATE", "dedup_min": 120, "max_lead": 60,
              "label": "Neve", "title": "❄️ Neve in arrivo"},
 }
 

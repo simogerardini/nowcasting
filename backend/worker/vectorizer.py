@@ -108,6 +108,8 @@ def vectorize_field(dbz: np.ndarray, transform, crs, lead_min: int, snow: np.nda
     for thr, event in sorted(THRESHOLD_EVENTS.items()):
         if events is not None and event not in events:
             continue
+        if lead_min > RADAR_EVENTS[event]["max_lead"]:
+            continue
         mask = field >= thr
         if event == "RAIN_START":
             mask &= ~is_snow  # snow onset is its own event
