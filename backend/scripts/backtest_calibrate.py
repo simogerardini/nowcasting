@@ -88,10 +88,14 @@ def one_run(t0_iso: str) -> dict | None:
             return None
         obs.append(preprocess(clamp_reflectivity(o).dbz))
     acc = {"n": 0}
-    hist = np.zeros((len(EVENTS), len(SLOPES_KM_MIN), len(leads), NB, 3), dtype="int64")  # n, obs, obs_nb
+    hist = np.zeros((len(EVENTS), len(SLOPES_KM_MIN), len(leads), NB, 4), dtype="int64")  # n, obs, obs_nb, obs_nb_t
     brier = np.zeros((len(EVENTS), len(SLOPES_KM_MIN), len(leads)), dtype="float64")
     det = np.zeros((len(EVENTS), len(leads), 4), dtype="int64")  # hits, misses, false alarms, correct neg (nb obs)
     field = res.observed_dbz
+    # observation masks: strict pixel, within ~3 km, and within ~3 km and +-1 frame (= production alert check)
+    obs_clean = [np.nan_to_num(o, neginf=-99) for o in obs]
+    valid_l = [np.isfinite(o) & np.isfinite(np.nan_to_num(res.forecast_dbz[li], neginf=-99))
+               for li, o in enumerate(obs_clean)]
     for ei, ev in enumerate(EVENTS):
         thr = RADAR_EVENTS[ev]["dbz"]
         for li in range(len(leads)):
@@ -104,16 +108,20 @@ def one_run(t0_iso: str) -> dict | None:
                             (fc & ~yes_nb & valid).sum(), (~fc & ~yes_nb & valid).sum()]
         for si, s_km in enumerate(SLOPES_KM_MIN):
             p = P.raw_probabilities(field, res.velocity, res.steps, thr, s_km * 5.0 / 2.0)
+            nbs = [ndimage.maximum_filter(np.where(valid_l[li], obs_clean[li], -99), size=3) >= thr
+                   for li in range(len(leads))]
             for li in range(len(leads)):
-                o = np.nan_to_num(obs[li], neginf=-99)
-                valid = np.isfinite(o) & np.isfinite(np.nan_to_num(res.forecast_dbz[li], neginf=-99))
+                o = obs_clean[li]
+                valid = valid_l[li]
                 yes = (o >= thr)
-                yes_nb = ndimage.maximum_filter(np.where(valid, o, -99), size=3) >= thr
+                yes_nb = nbs[li]
+                yes_nbt = yes_nb | (nbs[li - 1] if li > 0 else False) | (nbs[li + 1] if li + 1 < len(leads) else False)
                 pv = p[li][valid]
                 b = np.clip((pv * NB).astype(int), 0, NB - 1)
                 hist[ei, si, li, :, 0] += np.bincount(b, minlength=NB)
                 hist[ei, si, li, :, 1] += np.bincount(b, weights=yes[valid], minlength=NB).astype("int64")
                 hist[ei, si, li, :, 2] += np.bincount(b, weights=yes_nb[valid], minlength=NB).astype("int64")
+                hist[ei, si, li, :, 3] += np.bincount(b, weights=yes_nbt[valid], minlength=NB).astype("int64")
                 brier[ei, si, li] += float(((pv - yes[valid]) ** 2).sum())
     acc.update(hist=hist, brier=brier, det=det, n=1)
     return acc
@@ -162,7 +170,7 @@ def fit(train: dict, targets: dict[str, float]) -> dict:
         centres = 0.5 * (P.BINS[:-1] + P.BINS[1:])
         pc = np.stack([P.calibrate(centres.astype("float32"), ev, li, cal_tab) for li in range(max_li)])
         n = h[:max_li, :, 0]
-        hit_nb = h[:max_li, :, 2]
+        hit_nb = h[:max_li, :, 3]
         best = None
         for thr_p in np.arange(0.3, 0.96, 0.05):
             sel = pc >= thr_p
@@ -187,7 +195,7 @@ def evaluate(split: dict, cal: dict) -> dict:
         max_li = RADAR_EVENTS[ev]["max_lead"] // 5
         pc = np.stack([P.calibrate(centres.astype("float32"), ev, li, cal) for li in range(max_li)])
         sel = pc >= cal["alert_p"][ev]
-        n, hit_nb, yes = h[:max_li, :, 0], h[:max_li, :, 2], h[:max_li, :, 1]
+        n, hit_nb, yes = h[:max_li, :, 0], h[:max_li, :, 3], h[:max_li, :, 1]
         alerts = n[sel].sum()
         prec = hit_nb[sel].sum() / alerts if alerts else float("nan")
         pod = yes[sel].sum() / max(yes.sum(), 1)
@@ -201,6 +209,14 @@ def evaluate(split: dict, cal: dict) -> dict:
                    "old_precision": round(float(old_prec), 3), "old_pod": round(float(old_pod), 3),
                    "mean_forecast_p": round(float(mf), 4), "observed_freq": round(float(of), 4),
                    "alert_pixels": int(alerts)}
+        curve = []
+        for thr_p in np.arange(0.2, 0.96, 0.05):
+            sl = pc >= thr_p
+            a_ = n[sl].sum()
+            curve.append({"p": round(float(thr_p), 2),
+                          "precision": round(float(hit_nb[sl].sum() / a_), 3) if a_ else None,
+                          "pod": round(float(yes[sl].sum() / max(yes.sum(), 1)), 3)})
+        out[ev]["curve"] = curve
     return out
 
 
@@ -216,10 +232,13 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     for n in ("httpx", "nowcast", "vectorizer", "ingest"):
         logging.getLogger(n).setLevel(logging.WARNING)
-    targets = {"RAIN_START": 0.8, "HEAVY_RAIN": 0.75, "CLOUDBURST": 0.6, "HAIL": 0.5}
+    targets = {"RAIN_START": 0.85, "HEAVY_RAIN": 0.8, "CLOUDBURST": 0.7, "HAIL": 0.6}
     train = run_split(a.train.split(","), a.runs_per_day, a.workers)
+    np.savez_compressed(Path(a.out).with_suffix(".train.npz"), **{k: v for k, v in train.items()})
     cal = fit(train, targets)
     valid = run_split(a.valid.split(","), a.runs_per_day, a.workers)
+    if valid:
+        np.savez_compressed(Path(a.out).with_suffix(".valid.npz"), **{k: v for k, v in valid.items()})
     cal["targets_precision"] = targets
     cal["train_days"], cal["valid_days"] = a.train.split(","), a.valid.split(",")
     cal["scores_train"] = evaluate(train, cal)
