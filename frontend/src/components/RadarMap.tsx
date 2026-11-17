@@ -3,7 +3,8 @@
 import maplibregl, { GeoJSONSource, ImageSource, Map as MlMap } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { API_URL, getRuntimeConfig, SEVERITY_COLORS, SEVERITY_LABEL } from "@/lib/config";
+import { API_URL, getRuntimeConfig } from "@/lib/config";
+import { CAP_EVENTS, EVENT_BY_ID, RADAR_EVENTS } from "@/lib/events";
 import type { Coords } from "@/lib/pushManager";
 
 interface Frame {
@@ -23,23 +24,48 @@ interface Manifest {
   legend: { dbz: number; color: string }[];
 }
 
-// CARTO Voyager raster tiles (lightweight, no style/glyph downloads) - same basemap as tracciatore-gpx
-const BASEMAP_STYLE: maplibregl.StyleSpecification = {
+// OpenFreeMap "dark" vector style (free, no API key, no usage limits), tuned for OLED screens:
+// pure-black land, very dark blue sea for coastlines, slightly brighter labels.
+const BASEMAP_URL = "https://tiles.openfreemap.org/styles/dark";
+const BLACK_STYLE: maplibregl.StyleSpecification = {
   version: 8,
-  sources: {
-    carto: {
-      type: "raster",
-      tiles: ["a", "b", "c", "d"].map((sub) => `https://${sub}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png`),
-      tileSize: 256,
-      maxzoom: 19,
-      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/attributions">CARTO</a>',
-    },
-  },
-  layers: [
-    { id: "bg", type: "background", paint: { "background-color": "#e5e7eb" } },
-    { id: "carto", type: "raster", source: "carto" },
-  ],
+  sources: {},
+  layers: [{ id: "bg", type: "background", paint: { "background-color": "#000000" } }],
 };
+const OLED_PAINT: Record<string, Record<string, unknown>> = {
+  background: { "background-color": "#000000" },
+  water: { "fill-color": "#061226" },
+  waterway: { "line-color": "#061226" },
+  landcover_ice_shelf: { "fill-color": "#000000" },
+  landcover_glacier: { "fill-color": "#050505" },
+  landuse_residential: { "fill-color": "#080808" },
+  landcover_wood: { "fill-color": "#0b0b0b" },
+  landuse_park: { "fill-color": "#0b0b0b" },
+  building: { "fill-color": "#0d0d0d" },
+  road_area_pier: { "fill-color": "#000000" },
+};
+
+async function loadBasemap(): Promise<maplibregl.StyleSpecification> {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 6000);
+    const r = await fetch(BASEMAP_URL, { signal: ctl.signal });
+    clearTimeout(t);
+    if (!r.ok) return BLACK_STYLE;
+    const style = (await r.json()) as maplibregl.StyleSpecification;
+    for (const layer of style.layers) {
+      const patch = OLED_PAINT[layer.id];
+      if (patch) Object.assign(((layer as { paint?: object }).paint ??= {}), patch);
+      if (layer.type === "symbol" && layer.id.startsWith("place_")) {
+        Object.assign(((layer as { paint?: object }).paint ??= {}), { "text-color": "#9ca3af", "text-halo-color": "#000000" });
+      }
+    }
+    return style;
+  } catch {
+    return BLACK_STYLE;
+  }
+}
+
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 const REFRESH_MS = 60_000;
 
@@ -60,9 +86,14 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
   // ---------------------------------------------------------------- map init
   useEffect(() => {
     if (!container.current || map.current) return;
-    const m = initMap(container.current, BASEMAP_STYLE);
+    let m: MlMap | null = null;
+    let cancelled = false;
+    void loadBasemap().then((style) => {
+      if (!cancelled && container.current) m = initMap(container.current, style);
+    });
     return () => {
-      m.remove();
+      cancelled = true;
+      m?.remove();
       map.current = null;
     };
   }, []);
@@ -74,9 +105,11 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
       center: [12.5, 42.0],
       zoom: 5.2,
       maxZoom: 12,
-      attributionControl: { compact: true, customAttribution: "Radar © DPC / RainViewer · Nowcast Noctalix" },
+      attributionControl: { compact: true, customAttribution: "Radar © DPC / RainViewer · © OpenFreeMap © OpenStreetMap" },
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    // start with the (compact) attribution collapsed
+    m.once("load", () => el.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show"));
     m.on("load", () => {
       m.addSource("risk", { type: "geojson", data: EMPTY_FC });
       m.addSource("cap", { type: "geojson", data: EMPTY_FC });
@@ -93,9 +126,9 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
         paint: { "line-color": "#a855f7", "line-width": 1.5, "line-dasharray": [2, 2] },
       });
       const sevColor: maplibregl.ExpressionSpecification = [
-        "match", ["get", "severity_level"],
-        "EXTREME", SEVERITY_COLORS.EXTREME, "SEVERE", SEVERITY_COLORS.SEVERE, SEVERITY_COLORS.MODERATE,
-      ];
+        "match", ["get", "event_type"],
+        ...RADAR_EVENTS.flatMap((e) => [e.id, e.color]), "#facc15",
+      ] as unknown as maplibregl.ExpressionSpecification;
       m.addLayer({ id: "risk-fill", type: "fill", source: "risk", paint: { "fill-color": sevColor, "fill-opacity": 0.12 } });
       m.addLayer({ id: "risk-line", type: "line", source: "risk", paint: { "line-color": sevColor, "line-width": 1.8 } });
       m.on("click", "risk-fill", (e) => {
@@ -105,7 +138,7 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
         new maplibregl.Popup({ closeButton: false })
           .setLngLat(e.lngLat)
           .setHTML(
-            `<b>${SEVERITY_LABEL[p.severity_level as string] ?? p.severity_level}</b><br/>` +
+            `<b>${EVENT_BY_ID[p.event_type as string]?.label ?? p.event_type}</b><br/>` +
               `+${p.lead_time_minutes} min (${fmtTime(p.valid_time as string)})<br/>` +
               `max ${p.max_dbz} dBZ · ~${p.estimated_rain_mmh} mm/h`,
           )
@@ -116,7 +149,7 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
         if (!p) return;
         new maplibregl.Popup({ closeButton: false })
           .setLngLat(e.lngLat)
-          .setHTML(`<b>📢 ${p.event}</b><br/>${p.headline ?? p.area_desc ?? ""}<br/><small>${p.severity}</small>`)
+          .setHTML(`<b>📢 ${CAP_EVENTS.find((c) => c.id === p.event_type)?.label ?? p.event}</b><br/>${p.event}<br/>${p.headline ?? p.area_desc ?? ""}<br/><small>${p.severity}</small>`)
           .addTo(m);
       });
       setReady(true);
@@ -181,12 +214,15 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     else {
       m.addSource("radar", { type: "image", url: frame.url, coordinates: manifest.coordinates });
       m.addLayer(
-        { id: "radar", type: "raster", source: "radar", paint: { "raster-opacity": 0.75, "raster-fade-duration": 0, "raster-resampling": "nearest" } },
+        { id: "radar", type: "raster", source: "radar", paint: { "raster-opacity": 0.75, "raster-fade-duration": 0, "raster-resampling": "linear" } },
         "cap-fill",
       );
     }
     const lead = frame.kind === "forecast" ? frame.offset_min : -1;
-    const filter: maplibregl.FilterSpecification = ["==", ["get", "lead_time_minutes"], lead];
+    // RAIN_START areas (any rain >= 20 dBZ) are what the radar image already shows: don't outline them
+    const filter: maplibregl.FilterSpecification = [
+      "all", ["==", ["get", "lead_time_minutes"], lead], ["!=", ["get", "event_type"], "RAIN_START"],
+    ];
     m.setFilter("risk-fill", filter);
     m.setFilter("risk-line", filter);
   }, [ready, manifest, frame]);

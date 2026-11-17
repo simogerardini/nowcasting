@@ -54,6 +54,9 @@ def test_nowcast_and_vectorize():
     polys = vectorize(res)
     sev = {p.severity_level for p in polys}
     assert "MODERATE" in sev and "SEVERE" in sev
+    ev = {p.event_type for p in polys}
+    assert {"RAIN_START", "HEAVY_RAIN", "CLOUDBURST"} <= ev
+    assert any(p.lead_time_minutes == 0 and p.event_type == "RAIN_START" for p in polys)
     leads = {p.lead_time_minutes for p in polys}
     assert 5 in leads
     for p in polys:
@@ -79,7 +82,7 @@ def test_quiet_hours():
     assert in_quiet_hours(time(23, 0), time(7, 0), "Europe/Rome", now)
     assert not in_quiet_hours(time(1, 0), time(7, 0), "Europe/Rome", now)
     assert not in_quiet_hours(None, None, "Europe/Rome", now)
-    assert not should_send("MODERATE", True)
+    assert not should_send("MODERATE", True) and not should_send("INFO", True)
     assert should_send("SEVERE", True) and should_send("EXTREME", True) and should_send("MODERATE", False)
 
 
@@ -100,3 +103,25 @@ def test_crop_and_downsample():
     assert g.dbz.shape == (150, 200)
     assert np.isnan(g.dbz[0, 0])
     assert abs(np.nanmax(g.dbz) - np.nanmax(f.dbz)) < 1.0
+
+
+def test_snow_polygons():
+    frames = synthetic_frames()
+    for f in frames:
+        f.snow = np.ones(f.dbz.shape, dtype="float32")
+    res = run_nowcast(frames)
+    assert res.snow_fc is not None and res.snow_fc.shape == res.forecast_dbz.shape
+    polys = vectorize(res)
+    ev = {p.event_type for p in polys}
+    assert "SNOW" in ev and "RAIN_START" not in ev
+
+
+def test_cap_event_mapping_and_regions():
+    from app.events import cap_event_type
+    from worker.cap import region_geometry
+    assert cap_event_type("Yellow Thunderstorm Warning") == "CAP_THUNDERSTORM"
+    assert cap_event_type("Orange Rain-Flood Warning") == "CAP_RAIN"
+    assert cap_event_type("Yellow Snow-Ice Warning") == "CAP_SNOW_ICE"
+    assert cap_event_type("Red High-Temperature Warning") == "CAP_HEAT"
+    g = region_geometry("Emilia e Romagna")
+    assert g is not None and g.contains(__import__("shapely.geometry", fromlist=["Point"]).Point(11.34, 44.49))

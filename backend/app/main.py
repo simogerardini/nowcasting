@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
+from .events import CAP_EVENTS, DEFAULT_ALERT_TYPES, RADAR_EVENTS
 from .database import get_session, init_db
 from .kv import MemoryKV, get_kv
 from .models import LocationIn, ResubscribeIn, SettingsIn, SubscribeIn, SubscriptionOut, UnsubscribeIn
@@ -69,7 +70,7 @@ def _validate_tz(tz: str | None) -> None:
 
 
 SUB_COLUMNS = """id, ST_Y(location) AS lat, ST_X(location) AS lon, min_severity_dbz,
-                 quiet_hours_start, quiet_hours_end, timezone"""
+                 quiet_hours_start, quiet_hours_end, timezone, alert_types"""
 
 
 @app.get("/api/v1/health")
@@ -107,6 +108,15 @@ async def vapid_public_key():
     return {"publicKey": settings.vapid_public_key}
 
 
+@app.get("/api/v1/event-types")
+async def event_types():
+    return {
+        "radar": [{"id": k, "label": v["label"], "severity": v["severity"]} for k, v in RADAR_EVENTS.items()],
+        "cap": [{"id": k, "label": v["label"]} for k, v in CAP_EVENTS.items()],
+        "default": DEFAULT_ALERT_TYPES,
+    }
+
+
 @app.get("/api/v1/config")
 async def public_config():
     return {"publicKey": settings.vapid_public_key, "assetsUrl": settings.assets_base_url}
@@ -117,9 +127,10 @@ async def subscribe(body: SubscribeIn, session: AsyncSession = Depends(get_sessi
     _validate_tz(body.timezone)
     row = (await session.execute(text(f"""
         INSERT INTO user_subscriptions (endpoint, p256dh, auth, location, min_severity_dbz,
-                                        quiet_hours_start, quiet_hours_end, timezone, updated_at)
+                                        quiet_hours_start, quiet_hours_end, timezone, alert_types, updated_at)
         VALUES (:endpoint, :p256dh, :auth, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326),
-                COALESCE(:min_dbz, 40), :qs, :qe, COALESCE(:tz, 'Europe/Rome'), NOW())
+                COALESCE(:min_dbz, 40), :qs, :qe, COALESCE(:tz, 'Europe/Rome'),
+                COALESCE(CAST(:types AS TEXT[]), CAST(:default_types AS TEXT[])), NOW())
         ON CONFLICT (endpoint) DO UPDATE SET
             p256dh = EXCLUDED.p256dh,
             auth = EXCLUDED.auth,
@@ -128,8 +139,10 @@ async def subscribe(body: SubscribeIn, session: AsyncSession = Depends(get_sessi
             quiet_hours_start = EXCLUDED.quiet_hours_start,
             quiet_hours_end = EXCLUDED.quiet_hours_end,
             timezone = COALESCE(:tz, user_subscriptions.timezone),
+            alert_types = COALESCE(CAST(:types AS TEXT[]), user_subscriptions.alert_types),
             updated_at = NOW()
         RETURNING {SUB_COLUMNS}"""), {
+        "types": body.alert_types, "default_types": DEFAULT_ALERT_TYPES,
         "endpoint": body.subscription.endpoint, "p256dh": body.subscription.keys.p256dh,
         "auth": body.subscription.keys.auth, "lat": body.lat, "lon": body.lon,
         "min_dbz": body.min_severity_dbz, "qs": body.quiet_hours_start, "qe": body.quiet_hours_end,
@@ -160,8 +173,10 @@ async def update_settings(body: SettingsIn, session: AsyncSession = Depends(get_
             quiet_hours_start = CASE WHEN :clear THEN NULL ELSE COALESCE(:qs, quiet_hours_start) END,
             quiet_hours_end   = CASE WHEN :clear THEN NULL ELSE COALESCE(:qe, quiet_hours_end) END,
             timezone = COALESCE(:tz, timezone),
+            alert_types = COALESCE(CAST(:types AS TEXT[]), alert_types),
             updated_at = NOW()
         WHERE endpoint = :endpoint RETURNING {SUB_COLUMNS}"""), {
+        "types": body.alert_types,
         "endpoint": body.endpoint, "min_dbz": body.min_severity_dbz, "qs": body.quiet_hours_start,
         "qe": body.quiet_hours_end, "tz": body.timezone, "clear": body.clear_quiet_hours,
     })).mappings().first()
@@ -200,13 +215,15 @@ async def alerts_at_point(lat: float, lon: float, session: AsyncSession = Depend
         raise HTTPException(422, "invalid coordinates")
     params = {"lat": lat, "lon": lon}
     radar = (await session.execute(text("""
-        SELECT f.lead_time_minutes, f.severity_level, f.max_dbz, f.estimated_rain_mmh, f.run_timestamp
+        SELECT f.lead_time_minutes, f.severity_level, f.event_type, f.max_dbz, f.estimated_rain_mmh, f.run_timestamp
         FROM forecast_polygons f
         WHERE f.run_timestamp = (SELECT max(run_timestamp) FROM forecast_polygons)
           AND ST_Intersects(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), f.geom)
-        ORDER BY f.lead_time_minutes ASC, f.max_dbz DESC"""), params)).mappings().all()
+        ORDER BY f.lead_time_minutes ASC,
+                 (CASE f.severity_level WHEN 'EXTREME' THEN 3 WHEN 'SEVERE' THEN 2
+                  WHEN 'MODERATE' THEN 1 ELSE 0 END) DESC"""), params)).mappings().all()
     cap = (await session.execute(text("""
-        SELECT identifier, event, severity, headline, area_desc, onset, expires FROM cap_alerts
+        SELECT identifier, event, event_type, severity, headline, area_desc, onset, expires FROM cap_alerts
         WHERE (expires IS NULL OR expires > NOW())
           AND ST_Intersects(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), geom)"""), params)).mappings().all()
     return {"radar": [dict(r) for r in radar], "cap": [dict(c) for c in cap]}

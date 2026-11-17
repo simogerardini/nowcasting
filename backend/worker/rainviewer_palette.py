@@ -278,11 +278,17 @@ def _build():
 
 
 KEYS, VALS = _build()
+SNOW_KEYS = np.array(sorted({rgba for _, rgba in SNOW if rgba & 0xFF}), dtype=np.uint32)
 _RGB = np.stack([(KEYS >> 24) & 255, (KEYS >> 16) & 255, (KEYS >> 8) & 255], axis=1).astype(np.int32)
 
 
 def decode(rgba: np.ndarray) -> np.ndarray:
     """(H, W, 4) uint8 tile -> (H, W) float32 dBZ; NaN where transparent (no echo / no coverage)."""
+    return decode_with_snow(rgba)[0]
+
+
+def decode_with_snow(rgba: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Like decode(), plus a boolean mask of pixels drawn with the snow palette (tiles requested with snow=1)."""
     h, w, _ = rgba.shape
     flat = rgba.reshape(-1, 4).astype(np.uint32)
     packed = (flat[:, 0] << 24) | (flat[:, 1] << 16) | (flat[:, 2] << 8) | flat[:, 3]
@@ -299,4 +305,6 @@ def decode(rgba: np.ndarray) -> np.ndarray:
         d = ((rgb[:, None, :] - _RGB[None, :, :]) ** 2).sum(-1)
         lut[miss] = VALS[d.argmin(1)]
     out[opaque] = lut[inv]
-    return out.reshape(h, w)
+    snow = np.zeros(packed.shape, dtype=bool)
+    snow[opaque] = np.isin(uniq, SNOW_KEYS)[inv]
+    return out.reshape(h, w), snow.reshape(h, w)

@@ -17,7 +17,7 @@ from rasterio.transform import Affine, from_bounds
 
 from app.config import get_settings
 
-from .rainviewer_palette import decode as decode_rv
+from .rainviewer_palette import decode_with_snow
 
 log = logging.getLogger("ingest")
 settings = get_settings()
@@ -32,6 +32,7 @@ class RadarFrame:
     transform: Affine
     crs: CRS
     source: str
+    snow: np.ndarray | None = None  # bool/fraction mask of snow echoes (RainViewer only)
 
 
 class IngestError(RuntimeError):
@@ -170,9 +171,10 @@ class RainViewerClient:
         x1, y1 = _tile_xy(self.bbox[2], self.bbox[1], self.z)
         nx, ny = x1 - x0 + 1, y1 - y0 + 1
         out = np.full((ny * 256, nx * 256), np.nan, dtype="float32")
+        snow = np.zeros(out.shape, dtype=bool)
 
         def get(tx: int, ty: int):
-            r = self.c.get(f"{host}{p['path']}/256/{self.z}/{tx}/{ty}/2/0_0.png")
+            r = self.c.get(f"{host}{p['path']}/256/{self.z}/{tx}/{ty}/2/0_1.png")  # scheme 2, snow=1
             return tx, ty, (r.content if r.status_code == 200 else None)
 
         with ThreadPoolExecutor(max_workers=6) as ex:
@@ -183,12 +185,14 @@ class RainViewerClient:
             img = np.asarray(Image.open(io.BytesIO(content)).convert("RGBA"))
             oy, ox = (ty - y0) * 256, (tx - x0) * 256
             # transparent = no echo: inside the mosaic that is "dry" (-inf), not missing data
-            out[oy:oy + 256, ox:ox + 256] = np.nan_to_num(decode_rv(img), nan=-np.inf)
+            dbz, sn = decode_with_snow(img)
+            out[oy:oy + 256, ox:ox + 256] = np.nan_to_num(dbz, nan=-np.inf)
+            snow[oy:oy + 256, ox:ox + 256] = sn
         left, _, _, top = _tile_bounds_merc(x0, y0, self.z)
         _, bottom, right, _ = _tile_bounds_merc(x1, y1, self.z)
         transform = from_bounds(left, bottom, right, top, out.shape[1], out.shape[0])
         t = datetime.fromtimestamp(int(p["time"]), tz=timezone.utc)
-        return RadarFrame(t, out, transform, WEB_MERC, "RAINVIEWER")
+        return RadarFrame(t, out, transform, WEB_MERC, "RAINVIEWER", snow)
 
 
 # ------------------------------------------------------------------ grid reduction
@@ -198,7 +202,7 @@ def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = Non
     from rasterio.windows import from_bounds as win_from_bounds
 
     factor = factor or settings.radar_downsample
-    arr, tr = f.dbz, f.transform
+    arr, tr, snow = f.dbz, f.transform, f.snow
     if f.crs and not f.crs.is_geographic:
         t = Transformer.from_crs("EPSG:4326", f.crs, always_xy=True)
         (x0, x1), (y0, y1) = t.transform([bbox[0], bbox[2]], [bbox[1], bbox[3]])
@@ -209,6 +213,7 @@ def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = Non
     r1, c1 = min(r0 + int(win.height), arr.shape[0]), min(c0 + int(win.width), arr.shape[1])
     if r1 > r0 and c1 > c0:
         arr = arr[r0:r1, c0:c1]
+        snow = snow[r0:r1, c0:c1] if snow is not None else None
         tr = tr * Affine.translation(c0, r0)
     if factor and factor > 1:
         h, w = (arr.shape[0] // factor) * factor, (arr.shape[1] // factor) * factor
@@ -220,8 +225,10 @@ def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = Non
         with np.errstate(divide="ignore"):
             out = np.where(zmean > 0, 10.0 * np.log10(zmean), -np.inf).astype("float32")
         out[missing] = np.nan
+        if snow is not None:
+            snow = snow[:h, :w].astype("float32").reshape(blocks.shape).mean(axis=(1, 3))
         arr, tr = out, tr * Affine.scale(factor, factor)
-    return RadarFrame(f.time, arr, tr, f.crs, f.source)
+    return RadarFrame(f.time, arr, tr, f.crs, f.source, snow)
 
 
 # ------------------------------------------------------------------ public API

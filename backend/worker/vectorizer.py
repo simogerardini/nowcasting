@@ -18,7 +18,7 @@ from scipy import ndimage
 from shapely.geometry import MultiPolygon, Polygon, shape
 
 from app.config import get_settings
-from app.models import severity_for_dbz
+from app.events import RADAR_EVENTS, THRESHOLD_EVENTS
 
 from .nowcast_engine import NowcastResult, dbz_to_rain
 from .storage import CACHE_FRESH, CACHE_IMMUTABLE, Storage
@@ -44,6 +44,7 @@ class RiskPolygon:
     max_dbz: float
     estimated_rain_mmh: float
     geom: MultiPolygon  # EPSG:4326
+    event_type: str = "HEAVY_RAIN"
 
 
 def _xform(src: CRS, dst: CRS):
@@ -66,53 +67,76 @@ def _as_multi(g) -> MultiPolygon | None:
     return MultiPolygon(polys) if polys else None
 
 
-def vectorize_field(dbz: np.ndarray, transform, crs, lead_min: int) -> list[RiskPolygon]:
-    to_metric = _xform(crs, METRIC)
-    to_wgs = _xform(METRIC, WGS84)
+def _components(mask: np.ndarray, field: np.ndarray, transform, crs, buf_m: float, simplify_m: float = 250):
+    """Connected components of mask -> list of (MultiPolygon EPSG:4326, max_dbz, p90_dbz)."""
+    labels, n = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))  # 8-connectivity
+    if n == 0:
+        return []
+    sizes = ndimage.sum_labels(mask, labels, index=np.arange(1, n + 1))
+    keep = np.zeros(n + 1, dtype=bool)
+    keep[1:] = sizes >= settings.min_polygon_pixels
+    labels[~keep[labels]] = 0
+    if not labels.any():
+        return []
+    stats: dict[int, tuple[float, float]] = {}
+    for idx, sl in enumerate(ndimage.find_objects(labels), start=1):
+        if sl is None or not keep[idx]:
+            continue
+        vals = field[sl][labels[sl] == idx]
+        stats[idx] = (float(vals.max()), float(np.percentile(vals, 90)))
+    parts: dict[int, list] = {}
+    for geom, val in features.shapes(labels.astype("int32"), mask=labels > 0, transform=transform):
+        parts.setdefault(int(val), []).append(shape(geom))
+    to_metric, to_wgs = _xform(crs, METRIC), _xform(METRIC, WGS84)
+    out = []
+    for idx, polys in parts.items():
+        g = shapely.transform(shapely.union_all(polys), to_metric)
+        g = g.buffer(buf_m, quad_segs=4).simplify(simplify_m, preserve_topology=True)
+        g = _as_multi(shapely.make_valid(shapely.transform(g, to_wgs)))
+        if g is not None:
+            out.append((g, *stats[idx]))
+    return out
+
+
+def vectorize_field(dbz: np.ndarray, transform, crs, lead_min: int, snow: np.ndarray | None = None,
+                    events: list[str] | None = None) -> list[RiskPolygon]:
+    """One forecast step -> risk polygons per event type (rain thresholds + snow mask)."""
     field = np.where(np.isfinite(dbz), dbz, -np.inf)
-    out: list[RiskPolygon] = []
-    structure = np.ones((3, 3), dtype=bool)  # 8-connectivity
+    is_snow = (snow > 0.5) if snow is not None else np.zeros(field.shape, dtype=bool)
     buf_m = buffer_km(lead_min) * 1000.0
-    for thr in settings.thresholds:
+    out: list[RiskPolygon] = []
+    for thr, event in sorted(THRESHOLD_EVENTS.items()):
+        if events is not None and event not in events:
+            continue
         mask = field >= thr
+        if event == "RAIN_START":
+            mask &= ~is_snow  # snow onset is its own event
         if not mask.any():
             continue
-        labels, n = ndimage.label(mask, structure=structure)
-        sizes = ndimage.sum_labels(mask, labels, index=np.arange(1, n + 1))
-        keep = np.zeros(n + 1, dtype=bool)
-        keep[1:] = sizes >= settings.min_polygon_pixels
-        labels[~keep[labels]] = 0
-        if not labels.any():
-            continue
-        objs = ndimage.find_objects(labels)
-        stats: dict[int, tuple[float, float]] = {}
-        for idx, sl in enumerate(objs, start=1):
-            if sl is None or not keep[idx]:
-                continue
-            vals = field[sl][labels[sl] == idx]
-            stats[idx] = (float(vals.max()), float(np.percentile(vals, 90)))
-        parts: dict[int, list] = {}
-        for geom, val in features.shapes(labels.astype("int32"), mask=labels > 0, transform=transform):
-            parts.setdefault(int(val), []).append(shape(geom))
-        severity = severity_for_dbz(thr)
-        for idx, polys in parts.items():
-            g = shapely.union_all(polys)
-            g = shapely.transform(g, to_metric)
-            g = g.buffer(buf_m, quad_segs=4).simplify(250, preserve_topology=True)
-            g = shapely.transform(g, to_wgs)
-            g = _as_multi(shapely.make_valid(g))
-            if g is None:
-                continue
-            max_dbz, p90 = stats[idx]
-            out.append(RiskPolygon(lead_min, severity, thr, round(max_dbz, 1),
-                                   round(float(dbz_to_rain(np.array(p90))), 1), g))
+        spec = RADAR_EVENTS[event]
+        for g, mx, p90 in _components(mask, field, transform, crs, buf_m):
+            out.append(RiskPolygon(lead_min, spec["severity"], thr, round(mx, 1),
+                                   round(float(dbz_to_rain(np.array(p90))), 1), g, event))
+    if snow is not None and (events is None or "SNOW" in events):
+        spec = RADAR_EVENTS["SNOW"]
+        mask = (field >= spec["dbz"]) & is_snow
+        if mask.any():
+            for g, mx, p90 in _components(mask, field, transform, crs, buf_m):
+                out.append(RiskPolygon(lead_min, spec["severity"], spec["dbz"], round(mx, 1),
+                                       round(float(dbz_to_rain(np.array(p90))), 1), g, "SNOW"))
     return out
 
 
 def vectorize(result: NowcastResult) -> list[RiskPolygon]:
     polys: list[RiskPolygon] = []
+    # lead 0 = observed now: only used to know where it is ALREADY raining/snowing (onset alerts)
+    if result.observed_dbz is not None:
+        obs_snow = result.observed[-1].snow if result.observed else None
+        polys.extend(vectorize_field(result.observed_dbz, result.transform, result.crs, 0, obs_snow,
+                                     events=["RAIN_START", "SNOW"]))
     for i, lead in enumerate(result.lead_minutes):
-        polys.extend(vectorize_field(result.forecast_dbz[i], result.transform, result.crs, lead))
+        snow = result.snow_fc[i] if result.snow_fc is not None else None
+        polys.extend(vectorize_field(result.forecast_dbz[i], result.transform, result.crs, lead, snow))
     log.info("Vectorized %d risk polygons", len(polys))
     return polys
 
@@ -127,6 +151,7 @@ def to_geojson(result: NowcastResult, polys: list[RiskPolygon]) -> dict:
                 "lead_time_minutes": p.lead_time_minutes,
                 "valid_time": (result.run_time + timedelta(minutes=p.lead_time_minutes)).isoformat(),
                 "severity_level": p.severity_level,
+                "event_type": p.event_type,
                 "threshold_dbz": p.threshold_dbz,
                 "max_dbz": p.max_dbz,
                 "estimated_rain_mmh": p.estimated_rain_mmh,
@@ -138,11 +163,11 @@ def to_geojson(result: NowcastResult, polys: list[RiskPolygon]) -> dict:
 
 # ------------------------------------------------------------------ radar PNG rendering
 # NWS-like reflectivity palette (dBZ lower bound -> RGBA)
-PALETTE = [
-    (15, (4, 233, 231, 120)), (20, (1, 159, 244, 150)), (25, (3, 0, 244, 170)),
-    (30, (2, 253, 2, 180)), (35, (1, 197, 1, 190)), (40, (0, 142, 0, 200)),
-    (45, (253, 248, 2, 210)), (50, (229, 188, 0, 215)), (55, (253, 149, 0, 220)),
-    (60, (253, 0, 0, 225)), (65, (212, 0, 0, 230)), (70, (188, 0, 0, 235)), (75, (248, 0, 253, 240)),
+PALETTE = [  # tuned for a black (OLED) basemap: weak echoes faint, convective cores opaque
+    (20, (56, 189, 248, 70)), (25, (14, 165, 233, 95)), (30, (34, 197, 94, 130)),
+    (35, (22, 163, 74, 165)), (40, (21, 128, 61, 185)), (45, (250, 204, 21, 205)),
+    (50, (234, 179, 8, 215)), (55, (249, 115, 22, 225)), (60, (239, 68, 68, 235)),
+    (65, (220, 38, 38, 240)), (70, (185, 28, 28, 245)), (75, (217, 70, 239, 250)),
 ]
 
 

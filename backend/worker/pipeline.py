@@ -21,8 +21,9 @@ log = logging.getLogger("pipeline")
 settings = get_settings()
 
 INSERT_POLY = text("""
-INSERT INTO forecast_polygons (run_timestamp, lead_time_minutes, severity_level, max_dbz, estimated_rain_mmh, geom)
-VALUES (:run, :lead, :sev, :max_dbz, :rain, ST_Multi(ST_GeomFromText(:wkt, 4326)))
+INSERT INTO forecast_polygons (run_timestamp, lead_time_minutes, severity_level, event_type, max_dbz,
+                               estimated_rain_mmh, geom)
+VALUES (:run, :lead, :sev, :ev, :max_dbz, :rain, ST_Multi(ST_GeomFromText(:wkt, 4326)))
 """)
 
 
@@ -40,7 +41,7 @@ async def run_cycle(redis, storage: Storage) -> datetime | None:
         await session.execute(text("DELETE FROM forecast_polygons WHERE run_timestamp = :r"), {"r": run_time})
         if polys:
             await session.execute(INSERT_POLY, [{
-                "run": run_time, "lead": p.lead_time_minutes, "sev": p.severity_level,
+                "run": run_time, "lead": p.lead_time_minutes, "sev": p.severity_level, "ev": p.event_type,
                 "max_dbz": p.max_dbz, "rain": p.estimated_rain_mmh, "wkt": p.geom.wkt,
             } for p in polys])
         await session.execute(text("DELETE FROM forecast_polygons WHERE run_timestamp < :c"),

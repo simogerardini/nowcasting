@@ -3,6 +3,7 @@
 Geometry resolution order for each alert:
   1. <cap:polygon> / <polygon> in the Atom entry or in the linked CAP document ("lat,lon lat,lon ...")
   2. <geocode> (EMMA_ID / NUTS) looked up in an optional geocode GeoJSON (CAP_GEOCODES_URL or file)
+  3. <cap:areaDesc> = Italian region name -> bundled ISTAT region boundaries (data/it_regions.geojson)
 Alerts with no resolvable geometry are skipped (logged).
 """
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.events import cap_event_type
 
 log = logging.getLogger("cap")
 settings = get_settings()
@@ -83,6 +86,23 @@ def _load_geocodes(client: httpx.Client) -> dict[str, object]:
     return _geocodes
 
 
+_REGIONS: dict[str, object] | None = None
+
+
+def _region_key(name: str) -> str:
+    return re.sub(r"[^a-z]", "", (name or "").lower())[:6]
+
+
+def region_geometry(area_desc: str | None):
+    """Italian region (MeteoAlarm areaDesc, e.g. 'Emilia e Romagna') -> boundary geometry."""
+    global _REGIONS
+    if _REGIONS is None:
+        path = Path(__file__).with_name("data") / "it_regions.geojson"
+        _REGIONS = {f["properties"]["code"]: shape(f["geometry"])
+                    for f in json.loads(path.read_text())["features"]}
+    return _REGIONS.get(_region_key(area_desc or ""))
+
+
 def _area_geometry(el, client: httpx.Client) -> MultiPolygon | None:
     polys = [parse_cap_polygon(p.text) for p in el.iter() if p.tag.endswith("polygon") and p.text]
     polys = [p for p in polys if p is not None and not p.is_empty]
@@ -130,11 +150,16 @@ def fetch_cap_alerts() -> list[dict]:
                     except Exception as exc:  # noqa: BLE001
                         log.debug("CAP doc fetch failed %s: %s", href, exc)
             if geom is None:
+                reg = region_geometry(_txt(e, "cap:areaDesc"))
+                if reg is not None:
+                    geom = reg if isinstance(reg, MultiPolygon) else MultiPolygon([reg]) if isinstance(reg, Polygon) else None
+            if geom is None:
                 log.debug("CAP %s: no geometry, skipped", ident)
                 continue
             out.append({
                 "identifier": ident,
                 "event": _txt(e, "cap:event") or _txt(e, "a:title") or "Allerta",
+                "event_type": cap_event_type(_txt(e, "cap:event") or _txt(e, "a:title") or ""),
                 "severity": _txt(e, "cap:severity") or "Unknown",
                 "headline": _txt(e, "a:title"),
                 "description": _txt(e, "a:summary"),
@@ -150,10 +175,12 @@ def fetch_cap_alerts() -> list[dict]:
 async def store_cap_alerts(session: AsyncSession, alerts: list[dict]) -> None:
     for a in alerts:
         await session.execute(text("""
-            INSERT INTO cap_alerts (identifier, event, severity, headline, description, area_desc, onset, expires, geom)
-            VALUES (:identifier, :event, :severity, :headline, :description, :area_desc, :onset, :expires,
+            INSERT INTO cap_alerts (identifier, event, event_type, severity, headline, description, area_desc,
+                                    onset, expires, geom)
+            VALUES (:identifier, :event, :event_type, :severity, :headline, :description, :area_desc, :onset, :expires,
                     ST_Multi(ST_GeomFromText(:wkt, 4326)))
             ON CONFLICT (identifier) DO UPDATE SET severity = EXCLUDED.severity, expires = EXCLUDED.expires,
+                event_type = EXCLUDED.event_type,
                 headline = EXCLUDED.headline, description = EXCLUDED.description, fetched_at = NOW()
         """), {**{k: v for k, v in a.items() if k != "geom"}, "wkt": a["geom"].wkt})
     await session.execute(text("DELETE FROM cap_alerts WHERE expires < NOW() - INTERVAL '1 day'"))
@@ -162,7 +189,7 @@ async def store_cap_alerts(session: AsyncSession, alerts: list[dict]) -> None:
 
 async def cap_geojson(session: AsyncSession) -> dict:
     rows = (await session.execute(text("""
-        SELECT identifier, event, severity, headline, area_desc, onset, expires, ST_AsGeoJSON(geom, 5) AS g
+        SELECT identifier, event, event_type, severity, headline, area_desc, onset, expires, ST_AsGeoJSON(geom, 4) AS g
         FROM cap_alerts WHERE expires IS NULL OR expires > NOW()"""))).mappings().all()
     return {"type": "FeatureCollection", "features": [{
         "type": "Feature", "geometry": json.loads(r["g"]),

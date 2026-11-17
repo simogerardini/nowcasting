@@ -7,6 +7,8 @@ from sqlalchemy import Float, ForeignKey, Integer, String, Text, Time, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from .events import ALL_EVENTS
+
 SEVERITY_RANK = {"MODERATE": 1, "SEVERE": 2, "EXTREME": 3}
 
 
@@ -84,7 +86,18 @@ class Coordinates(BaseModel):
 
 
 class AlertPrefs(BaseModel):
-    min_severity_dbz: int | None = Field(default=None, ge=15, le=75)
+    min_severity_dbz: int | None = Field(default=None, ge=15, le=75)  # legacy, unused by matching
+    alert_types: list[str] | None = Field(default=None, max_length=32)
+
+    @field_validator("alert_types")
+    @classmethod
+    def known_types(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        bad = sorted(set(v) - ALL_EVENTS)
+        if bad:
+            raise ValueError(f"unknown alert types: {bad}")
+        return sorted(set(v))
     quiet_hours_start: time | None = None
     quiet_hours_end: time | None = None
     timezone: str | None = Field(default=None, max_length=64)
@@ -120,3 +133,4 @@ class SubscriptionOut(BaseModel):
     quiet_hours_start: time | None
     quiet_hours_end: time | None
     timezone: str
+    alert_types: list[str]

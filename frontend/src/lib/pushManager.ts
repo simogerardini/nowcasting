@@ -1,7 +1,9 @@
 import { API_URL, getRuntimeConfig } from "./config";
 
+import { DEFAULT_ALERT_TYPES } from "./events";
+
 export interface AlertPrefs {
-  min_severity_dbz: number;
+  alert_types: string[];
   quiet_hours_start: string | null; // "HH:MM"
   quiet_hours_end: string | null;
 }
@@ -16,7 +18,7 @@ const LS_LAST = "nowcast.lastCoords";
 const LS_PREFS = "nowcast.prefs";
 const MOVE_THRESHOLD_M = 500;
 
-export const DEFAULT_PREFS: AlertPrefs = { min_severity_dbz: 40, quiet_hours_start: null, quiet_hours_end: null };
+export const DEFAULT_PREFS: AlertPrefs = { alert_types: DEFAULT_ALERT_TYPES, quiet_hours_start: null, quiet_hours_end: null };
 
 export function isPushSupported(): boolean {
   return typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
@@ -38,7 +40,10 @@ export function isStandalone(): boolean {
 
 export function loadPrefs(): AlertPrefs {
   try {
-    return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(LS_PREFS) || "{}") };
+    const stored = JSON.parse(localStorage.getItem(LS_PREFS) || "{}");
+    const p: AlertPrefs = { ...DEFAULT_PREFS, ...stored };
+    if (!Array.isArray(p.alert_types)) p.alert_types = DEFAULT_ALERT_TYPES; // migrate pre-v2 prefs
+    return p;
   } catch {
     return DEFAULT_PREFS;
   }
@@ -114,7 +119,7 @@ export async function enableAlerts(prefs: AlertPrefs): Promise<Coords> {
     subscription: { endpoint: json.endpoint, keys: json.keys },
     lat: coords.lat,
     lon: coords.lon,
-    min_severity_dbz: prefs.min_severity_dbz,
+    alert_types: prefs.alert_types,
     quiet_hours_start: prefs.quiet_hours_start,
     quiet_hours_end: prefs.quiet_hours_end,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -131,7 +136,7 @@ export async function updatePrefs(prefs: AlertPrefs) {
   if (!endpoint) return;
   await api("/api/v1/settings", "PATCH", {
     endpoint,
-    min_severity_dbz: prefs.min_severity_dbz,
+    alert_types: prefs.alert_types,
     quiet_hours_start: prefs.quiet_hours_start,
     quiet_hours_end: prefs.quiet_hours_end,
     clear_quiet_hours: !prefs.quiet_hours_start || !prefs.quiet_hours_end,

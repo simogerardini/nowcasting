@@ -12,18 +12,37 @@ import {
   loadPrefs,
   storedEndpoint,
   updatePrefs,
+  DEFAULT_PREFS,
 } from "@/lib/pushManager";
+import { CAP_EVENTS, EventSpec, RADAR_EVENTS } from "@/lib/events";
 
-const LEVELS = [
-  { dbz: 35, label: "Pioggia forte (≥35 dBZ)" },
-  { dbz: 40, label: "Rovescio intenso (≥40 dBZ)" },
-  { dbz: 45, label: "Temporale forte (≥45 dBZ)" },
-  { dbz: 55, label: "Solo grandine / estremi (≥55 dBZ)" },
-];
+function Checks({
+  items, selected, onToggle, cols = 1,
+}: { items: EventSpec[]; selected: string[]; onToggle: (id: string, on: boolean) => void; cols?: 1 | 2 }) {
+  return (
+    <div className={cols === 2 ? "grid grid-cols-2 gap-x-2 gap-y-1.5" : "space-y-1.5"}>
+      {items.map((e) => (
+        <label key={e.id} className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            className="mt-1 accent-sky-500"
+            checked={selected.includes(e.id)}
+            onChange={(ev) => onToggle(e.id, ev.target.checked)}
+          />
+          <span>
+            <span className="mr-1 inline-block h-2 w-2 rounded-full align-middle" style={{ background: e.color }} />
+            {e.label}
+            {e.hint && <span className="block text-xs text-slate-400">{e.hint}</span>}
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
 
 export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) => void }) {
   const [open, setOpen] = useState(false);
-  const [prefs, setPrefs] = useState<AlertPrefs>({ min_severity_dbz: 40, quiet_hours_start: null, quiet_hours_end: null });
+  const [prefs, setPrefs] = useState<AlertPrefs>(DEFAULT_PREFS);
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -58,6 +77,13 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
     }
   }
 
+  function toggleType(id: string, on: boolean) {
+    const set = new Set(prefs.alert_types);
+    if (on) set.add(id);
+    else set.delete(id);
+    void save({ ...prefs, alert_types: [...set] });
+  }
+
   async function save(next: AlertPrefs) {
     setPrefs(next);
     try {
@@ -79,7 +105,7 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
         {enabled ? "🔔 Avvisi attivi" : "🔕 Attiva avvisi"}
       </button>
       {open && (
-        <div className="absolute right-3 top-40 z-20 w-[min(92vw,340px)] space-y-4 rounded-2xl bg-night-800/95 p-4 text-sm shadow-2xl backdrop-blur">
+        <div className="absolute right-3 top-40 z-20 max-h-[calc(100dvh-11rem)] w-[min(92vw,360px)] space-y-4 overflow-y-auto rounded-2xl bg-night-800/95 p-4 text-sm shadow-2xl backdrop-blur">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-bold">Avvisi meteo</h2>
             <button onClick={() => setOpen(false)} aria-label="Chiudi" className="text-slate-400">✕</button>
@@ -99,19 +125,16 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
             {busy ? "…" : enabled ? "Disattiva avvisi" : "Attiva avvisi push + GPS"}
           </button>
 
-          <fieldset className="space-y-1">
-            <legend className="mb-1 font-semibold">Soglia di intensità</legend>
-            {LEVELS.map((l) => (
-              <label key={l.dbz} className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="sev"
-                  checked={prefs.min_severity_dbz === l.dbz}
-                  onChange={() => save({ ...prefs, min_severity_dbz: l.dbz })}
-                />
-                {l.label}
-              </label>
-            ))}
+          <fieldset>
+            <legend className="mb-1 font-semibold">Radar · prossimi 60 minuti</legend>
+            <p className="mb-2 text-xs text-slate-400">Previsione sulla tua posizione, aggiornata ogni 10 min. Più affidabile entro 30 min.</p>
+            <Checks items={RADAR_EVENTS} selected={prefs.alert_types} onToggle={toggleType} />
+          </fieldset>
+
+          <fieldset>
+            <legend className="mb-1 font-semibold">Allerte ufficiali · fino a 1–2 giorni</legend>
+            <p className="mb-2 text-xs text-slate-400">MeteoAlarm / Protezione Civile per la tua regione (gialla, arancione, rossa).</p>
+            <Checks items={CAP_EVENTS} selected={prefs.alert_types} onToggle={toggleType} cols={2} />
           </fieldset>
 
           <fieldset className="space-y-2">
@@ -146,7 +169,7 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
                 />
               </div>
             )}
-            <p className="text-xs text-slate-400">Di notte vengono silenziati solo gli avvisi gialli; arancio e rosso arrivano sempre.</p>
+            <p className="text-xs text-slate-400">Di notte vengono silenziati inizio pioggia, pioggia forte, neve e allerte gialle; temporali forti, grandine e allerte arancioni/rosse arrivano sempre.</p>
           </fieldset>
 
           {msg && <p className="text-xs text-sky-200">{msg}</p>}

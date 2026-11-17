@@ -28,8 +28,9 @@ async def main():
     ep_gone = f"https://push.example/{uuid.uuid4()}"
     async with SessionLocal() as s:
         for ep in (ep_ok, ep_gone):  # storm centre ~ (10.2E, 44.5N) after 30 min
-            await s.execute(text("""INSERT INTO user_subscriptions (endpoint,p256dh,auth,location,min_severity_dbz)
-                VALUES (:e,'pkey-xxxxxxxxxxxx','auth-xxxx',ST_SetSRID(ST_MakePoint(10.25,44.5),4326),35)"""), {"e": ep})
+            await s.execute(text("""INSERT INTO user_subscriptions (endpoint,p256dh,auth,location,alert_types)
+                VALUES (:e,'pkey-xxxxxxxxxxxx','auth-xxxx',ST_SetSRID(ST_MakePoint(10.25,44.5),4326),
+                        '{HEAVY_RAIN,CLOUDBURST,HAIL,RAIN_START}')"""), {"e": ep})
         await s.commit()
     sent_to = []
     notifier._send_sync = lambda n: (sent_to.append((n.endpoint, n.payload["title"])), 410 if n.endpoint == ep_gone else 201)[1]

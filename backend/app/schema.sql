@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     finished_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- v2: selectable event types
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS alert_types TEXT[] NOT NULL
+    DEFAULT '{HEAVY_RAIN,CLOUDBURST,HAIL,CAP_THUNDERSTORM,CAP_RAIN,CAP_WIND}';
+ALTER TABLE forecast_polygons ADD COLUMN IF NOT EXISTS event_type VARCHAR(20) NOT NULL DEFAULT 'HEAVY_RAIN';
+CREATE INDEX IF NOT EXISTS idx_forecast_run_event ON forecast_polygons (run_timestamp, event_type, lead_time_minutes);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS event_type VARCHAR(20) NULL;
+ALTER TABLE cap_alerts ADD COLUMN IF NOT EXISTS event_type VARCHAR(20) NULL;
+
 -- Supabase exposes the public schema through its Data API: RLS with no policies blocks anon/authenticated
 -- roles entirely (the backend connects as table owner and is unaffected). Harmless on plain Postgres.
 ALTER TABLE user_subscriptions ENABLE ROW LEVEL SECURITY;
