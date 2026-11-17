@@ -81,3 +81,22 @@ def test_quiet_hours():
     assert not in_quiet_hours(None, None, "Europe/Rome", now)
     assert not should_send("MODERATE", True)
     assert should_send("SEVERE", True) and should_send("EXTREME", True) and should_send("MODERATE", False)
+
+
+def test_ten_minute_input_cadence():
+    """RainViewer cadence (10 min) must still yield 12 x 5-min lead times."""
+    frames = synthetic_frames()
+    for i, f in enumerate(frames):
+        f.time = frames[0].time + timedelta(minutes=10 * i)
+    res = run_nowcast(frames)
+    assert res.forecast_dbz.shape[0] == 12 and res.lead_minutes == [5 * (i + 1) for i in range(12)]
+
+
+def test_crop_and_downsample():
+    from worker.ingest_dpc import crop_and_downsample
+    f = synthetic_frames(n=1)[0]
+    f.dbz[0:2, 0:2] = np.nan
+    g = crop_and_downsample(f, bbox=(9.0, 43.0, 13.0, 46.0), factor=2)
+    assert g.dbz.shape == (150, 200)
+    assert np.isnan(g.dbz[0, 0])
+    assert abs(np.nanmax(g.dbz) - np.nanmax(f.dbz)) < 1.0

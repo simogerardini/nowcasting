@@ -163,7 +163,8 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
       (m.getSource("risk") as GeoJSONSource | undefined)?.setData(risk);
       (m.getSource("cap") as GeoJSONSource | undefined)?.setData(cap);
     } catch (e) {
-      setError(`Dati radar non disponibili (${(e as Error).message})`);
+      const msg = (e as Error).message;
+      setError(msg === "HTTP 404" ? "Primo ciclo radar in elaborazione, riprova tra qualche minuto" : `Dati radar non disponibili (${msg})`);
     }
   }, []);
 
@@ -248,7 +249,9 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     <div className="relative h-full w-full">
       <div ref={container} className="h-full w-full" />
       {error && (
-        <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded-lg bg-red-900/90 px-3 py-2 text-sm">{error}</div>
+        <div className="absolute inset-x-2 bottom-40 z-10 mx-auto max-w-md rounded-lg bg-red-900/90 px-3 py-2 text-center text-sm sm:bottom-44">
+          {error}
+        </div>
       )}
       <div className="absolute inset-x-2 bottom-2 rounded-2xl bg-night-900/85 p-3 shadow-xl backdrop-blur sm:inset-x-auto sm:left-1/2 sm:w-[560px] sm:-translate-x-1/2">
         <div className="mb-2 flex items-center justify-between text-sm">

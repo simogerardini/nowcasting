@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
+from datetime import datetime, timezone
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -26,6 +29,16 @@ log = logging.getLogger("scheduler")
 settings = get_settings()
 
 LOCK_KEY = "nowcast:lock"
+STATUS_FILE = Path(settings.radar_cache_dir).parent / "worker_status.json"
+
+
+def write_status(**kw) -> None:
+    try:
+        data = json.loads(STATUS_FILE.read_text()) if STATUS_FILE.exists() else {}
+        data.update(kw)
+        STATUS_FILE.write_text(json.dumps(data, default=str))
+    except OSError:
+        pass
 
 
 async def radar_tick(redis, storage: Storage, force: bool = False) -> None:
@@ -37,10 +50,14 @@ async def radar_tick(redis, storage: Storage, force: bool = False) -> None:
     if not await redis.set(LOCK_KEY, "1", ex=240, nx=True):
         log.info("Previous cycle still running - skip")
         return
+    write_status(last_attempt=datetime.now(timezone.utc).isoformat())
     try:
-        await run_cycle(redis, storage)
-    except Exception:  # noqa: BLE001
+        run = await run_cycle(redis, storage)
+        write_status(last_ok=datetime.now(timezone.utc).isoformat(), last_run=run, last_error=None)
+    except Exception as exc:  # noqa: BLE001
         log.exception("Radar cycle failed")
+        write_status(last_error=f"{type(exc).__name__}: {exc}"[:500],
+                     last_error_at=datetime.now(timezone.utc).isoformat())
     finally:
         await redis.delete(LOCK_KEY)
 

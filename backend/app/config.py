@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     rainviewer_api: str = "https://api.rainviewer.com/public/weather-maps.json"
     cap_feed_url: str = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-italy"
     n_input_frames: int = 6
+    radar_downsample: int = 2      # block-average factor (1 = native ~1 km); 2 keeps small VPSs fast
     n_leadtimes: int = 12
     timestep_min: int = 5
     min_dbz: float = 15.0

@@ -80,9 +80,14 @@ def run_nowcast(frames: list[RadarFrame]) -> NowcastResult:
     t0 = time.perf_counter()
     n = settings.n_leadtimes
     lead = [settings.timestep_min * (i + 1) for i in range(n)]
+    # Input cadence may differ from the output step (DPC 5 min, RainViewer 10 min):
+    # pySTEPS takes fractional timesteps in units of the input interval.
+    diffs = [(b.time - a.time).total_seconds() / 60 for a, b in zip(frames, frames[1:])]
+    dt_in = float(np.median(diffs)) if diffs else settings.timestep_min
+    steps: int | list[float] = n if abs(dt_in - settings.timestep_min) < 0.5 else [m / dt_in for m in lead]
 
     filtered = [RadarFrame(f.time, preprocess(f.dbz), f.transform, f.crs, f.source) for f in frames]
-    coverage = np.isfinite(frames[-1].dbz)  # radar footprint
+    coverage = ~np.isnan(frames[-1].dbz)  # radar footprint (-inf = observed dry)
     stack = np.stack([_to_db_rain(f.dbz) for f in filtered])  # (T,H,W) dB(R), no NaN
 
     wet_frac = float((stack[-1] > DB_ZERO).mean())
@@ -95,20 +100,21 @@ def run_nowcast(frames: list[RadarFrame]) -> NowcastResult:
         try:
             sprog = nowcasts.get_method("sprog")
             fc_db = sprog(
-                stack[-(ar_order + 1):], velocity, n,
+                stack[-(ar_order + 1):], velocity, steps,
                 precip_thr=10.0 * np.log10(RAIN_THR_MMH),
                 n_cascade_levels=6, ar_order=ar_order,
                 probmatching_method="cdf", domain="spatial", measure_time=False,
             )
         except Exception as exc:  # noqa: BLE001 - degenerate fields: pure advection
             log.warning("S-PROG failed (%s); using semi-Lagrangian extrapolation", exc)
-            fc_db = nowcasts.get_method("extrapolation")(stack[-1], velocity, n)
+            fc_db = nowcasts.get_method("extrapolation")(stack[-1], velocity, steps)
         fc_db = np.nan_to_num(np.asarray(fc_db), nan=DB_ZERO)
         fc = np.stack([_from_db_rain(fc_db[i]) for i in range(n)])
 
     fc[:, ~coverage] = np.nan
     elapsed = time.perf_counter() - t0
-    log.info("Nowcast done in %.2fs (grid %s, wet %.3f%%)", elapsed, stack.shape[1:], wet_frac * 100)
+    log.info("Nowcast done in %.2fs (grid %s, wet %.3f%%, input dt %.0f min)", elapsed, stack.shape[1:],
+             wet_frac * 100, dt_in)
     return NowcastResult(
         run_time=frames[-1].time, observed=filtered, forecast_dbz=fc, lead_minutes=lead,
         transform=frames[-1].transform, crs=frames[-1].crs, source=frames[-1].source, elapsed_s=elapsed,

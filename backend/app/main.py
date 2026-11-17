@@ -1,3 +1,4 @@
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -92,6 +93,12 @@ async def health(session: AsyncSession = Depends(get_session)):
         out["redis"] = f"error: {exc.__class__.__name__}"
         out["status"] = "degraded"
     out["assets_url"] = settings.assets_base_url
+    status_file = Path(settings.radar_cache_dir).parent / "worker_status.json"
+    if status_file.exists():
+        try:
+            out["worker"] = json.loads(status_file.read_text())
+        except ValueError:
+            pass
     return out
 
 

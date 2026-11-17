@@ -17,6 +17,8 @@ from rasterio.transform import Affine, from_bounds
 
 from app.config import get_settings
 
+from .rainviewer_palette import decode as decode_rv
+
 log = logging.getLogger("ingest")
 settings = get_settings()
 
@@ -134,8 +136,12 @@ def _tile_bounds_merc(x: int, y: int, z: int) -> tuple[float, float, float, floa
     return left, top - size, left + size, top
 
 
+_RV_CACHE: dict[str, RadarFrame] = {}  # frame path -> decoded frame (frames are immutable)
+
+
 class RainViewerClient:
-    """Composite from RainViewer tiles, colour scheme 0 = raw dBZ (value & 127) - 32."""
+    """Composite from RainViewer tiles (public API: zoom <= 7, "Universal Blue" scheme only, 10-min frames).
+    Colours are decoded back to dBZ with the official RainViewer colour table."""
 
     def __init__(self, client: httpx.Client, bbox=ITALY_BBOX, zoom=RV_ZOOM):
         self.c, self.bbox, self.z = client, bbox, zoom
@@ -147,28 +153,75 @@ class RainViewerClient:
         past = m["radar"]["past"][-n:]
         if len(past) < n:
             raise IngestError("RainViewer: not enough frames")
-        return [self._frame(m["host"], p) for p in past]
+        frames = []
+        for p in past:
+            if p["path"] not in _RV_CACHE:
+                _RV_CACHE[p["path"]] = self._frame(m["host"], p)
+            frames.append(_RV_CACHE[p["path"]])
+        keep = {p["path"] for p in m["radar"]["past"]}
+        for k in [k for k in _RV_CACHE if k not in keep]:
+            del _RV_CACHE[k]
+        return frames
 
     def _frame(self, host: str, p: dict) -> RadarFrame:
+        from concurrent.futures import ThreadPoolExecutor
+
         x0, y0 = _tile_xy(self.bbox[0], self.bbox[3], self.z)
         x1, y1 = _tile_xy(self.bbox[2], self.bbox[1], self.z)
         nx, ny = x1 - x0 + 1, y1 - y0 + 1
         out = np.full((ny * 256, nx * 256), np.nan, dtype="float32")
-        for ty in range(y0, y1 + 1):
-            for tx in range(x0, x1 + 1):
-                r = self.c.get(f"{host}{p['path']}/256/{self.z}/{tx}/{ty}/0/0_0.png")
-                if r.status_code != 200:
-                    continue
-                img = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGBA"))
-                val = (img[..., 0].astype("int16") & 127) - 32
-                tile = np.where(img[..., 3] > 0, val, np.nan).astype("float32")
-                oy, ox = (ty - y0) * 256, (tx - x0) * 256
-                out[oy:oy + 256, ox:ox + 256] = tile
+
+        def get(tx: int, ty: int):
+            r = self.c.get(f"{host}{p['path']}/256/{self.z}/{tx}/{ty}/2/0_0.png")
+            return tx, ty, (r.content if r.status_code == 200 else None)
+
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            tiles = list(ex.map(lambda xy: get(*xy), [(tx, ty) for ty in range(y0, y1 + 1) for tx in range(x0, x1 + 1)]))
+        for tx, ty, content in tiles:
+            if content is None:
+                continue
+            img = np.asarray(Image.open(io.BytesIO(content)).convert("RGBA"))
+            oy, ox = (ty - y0) * 256, (tx - x0) * 256
+            # transparent = no echo: inside the mosaic that is "dry" (-inf), not missing data
+            out[oy:oy + 256, ox:ox + 256] = np.nan_to_num(decode_rv(img), nan=-np.inf)
         left, _, _, top = _tile_bounds_merc(x0, y0, self.z)
         _, bottom, right, _ = _tile_bounds_merc(x1, y1, self.z)
         transform = from_bounds(left, bottom, right, top, out.shape[1], out.shape[0])
         t = datetime.fromtimestamp(int(p["time"]), tz=timezone.utc)
         return RadarFrame(t, out, transform, WEB_MERC, "RAINVIEWER")
+
+
+# ------------------------------------------------------------------ grid reduction
+def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = None) -> RadarFrame:
+    """Crop to the Italy bbox and block-average in linear Z (keeps dry=-inf, missing=NaN semantics)."""
+    from pyproj import Transformer
+    from rasterio.windows import from_bounds as win_from_bounds
+
+    factor = factor or settings.radar_downsample
+    arr, tr = f.dbz, f.transform
+    if f.crs and not f.crs.is_geographic:
+        t = Transformer.from_crs("EPSG:4326", f.crs, always_xy=True)
+        (x0, x1), (y0, y1) = t.transform([bbox[0], bbox[2]], [bbox[1], bbox[3]])
+    else:
+        x0, y0, x1, y1 = bbox
+    win = win_from_bounds(x0, y0, x1, y1, transform=tr).round_offsets().round_lengths()
+    r0, c0 = max(int(win.row_off), 0), max(int(win.col_off), 0)
+    r1, c1 = min(r0 + int(win.height), arr.shape[0]), min(c0 + int(win.width), arr.shape[1])
+    if r1 > r0 and c1 > c0:
+        arr = arr[r0:r1, c0:c1]
+        tr = tr * Affine.translation(c0, r0)
+    if factor and factor > 1:
+        h, w = (arr.shape[0] // factor) * factor, (arr.shape[1] // factor) * factor
+        a = arr[:h, :w]
+        z = np.where(np.isfinite(a), np.power(10.0, a / 10.0), 0.0)
+        blocks = z.reshape(h // factor, factor, w // factor, factor)
+        missing = np.isnan(a).reshape(blocks.shape).all(axis=(1, 3))
+        zmean = blocks.mean(axis=(1, 3))
+        with np.errstate(divide="ignore"):
+            out = np.where(zmean > 0, 10.0 * np.log10(zmean), -np.inf).astype("float32")
+        out[missing] = np.nan
+        arr, tr = out, tr * Affine.scale(factor, factor)
+    return RadarFrame(f.time, arr, tr, f.crs, f.source)
 
 
 # ------------------------------------------------------------------ public API
@@ -177,13 +230,13 @@ def fetch_latest_frames(n: int | None = None) -> list[RadarFrame]:
     n = n or settings.n_input_frames
     with httpx.Client(timeout=30, headers=UA, follow_redirects=True) as c:
         try:
-            frames = DPCClient(c).last_frames(n)
-            log.info("DPC: %d frames, latest %s", len(frames), frames[-1].time)
+            frames = [crop_and_downsample(f) for f in DPCClient(c).last_frames(n)]
+            log.info("DPC: %d frames, latest %s, grid %s", len(frames), frames[-1].time, frames[-1].dbz.shape)
             return frames
         except Exception as exc:  # noqa: BLE001
             log.warning("DPC ingest failed (%s); falling back to RainViewer", exc)
-        frames = RainViewerClient(c).last_frames(n)
-        log.info("RainViewer: %d frames, latest %s", len(frames), frames[-1].time)
+        frames = [crop_and_downsample(f) for f in RainViewerClient(c).last_frames(n)]
+        log.info("RainViewer: %d frames, latest %s, grid %s", len(frames), frames[-1].time, frames[-1].dbz.shape)
         return frames
 
 
