@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     lightning_min_flashes: int = 2
     rainviewer_api: str = "https://api.rainviewer.com/public/weather-maps.json"
     cap_feed_url: str = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-italy"
+    # Europe / world coverage: regional nowcast domains around subscribers and active viewers
+    regional_enabled: bool = True
+    opera_bucket_url: str = "https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup"
+    opera_api: str = ("https://api.meteogate.eu/eu-eumetnet-weather-radar/collections/observations/"
+                      "locations/0-20010-0-OPERA")
+    max_regional_domains: int = 6
+    domain_half_km: float = 200.0      # regional domain = square of 2 x this around a 1-degree cell
+    demand_ttl_min: int = 45           # viewer demand keeps a region alive this long
+    europe_map: bool = True            # publish the OPERA Europe observed composite for the map
+    meteoalarm_api: str = "https://feeds.meteoalarm.org/api/v1/warnings/feeds-{slug}"
+    nws_enabled: bool = True
+    glm_enabled: bool = True
     n_input_frames: int = 6
     radar_downsample: int = 2      # block-average factor (1 = native ~1 km); 2 keeps small VPSs fast
     n_leadtimes: int = 12

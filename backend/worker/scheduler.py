@@ -21,7 +21,7 @@ from app.kv import get_kv
 from app.vapid import ensure_vapid_keys
 
 from .ingest_dpc import latest_available_time
-from .pipeline import run_cap_cycle, run_cycle
+from .pipeline import run_cap_cycle, run_cycle, run_regional
 from .storage import Storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -69,7 +69,11 @@ async def lightning_tick(redis, storage: Storage) -> None:
 
     from . import lightning, notifier
     try:
-        flashes = await asyncio.to_thread(lightning.fetch_new_flashes)
+        flashes = await asyncio.to_thread(lightning.fetch_new_flashes) if lightning.enabled() else []
+        try:
+            flashes += await asyncio.to_thread(lightning.fetch_glm_flashes)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("GLM lightning failed: %s", exc)
         async with SessionLocal() as session:
             await lightning.store_flashes(session, flashes)
             geo = await lightning.lightning_geojson(session)
@@ -80,11 +84,31 @@ async def lightning_tick(redis, storage: Storage) -> None:
                               products_total=lightning.STATS["products"],
                               flashes_full_disc_total=lightning.STATS["flashes_full_disc"],
                               last_product=lightning.STATS["last_product"],
-                              flashes_60min=len(geo["features"]), notifications=sent, last_error=None)
+                              flashes_60min=len(geo["features"]), notifications=sent, last_error=None,
+                              glm_files=lightning.STATS.get("glm_files", 0),
+                              mtg_enabled=lightning.enabled(), regions=len(lightning.EXTRA_BBOXES))
     except Exception as exc:  # noqa: BLE001
         log.exception("Lightning cycle failed")
         lightning.save_status(last_error=f"{type(exc).__name__}: {exc}"[:400],
                               last_error_at=datetime.now(timezone.utc).isoformat())
+
+
+async def regional_tick(redis, storage: Storage) -> None:
+    """Europe map layer + regional nowcasts (Europe: OPERA, world: RainViewer). Shares the radar lock:
+    never runs concurrently with the Italy cycle (small VPS)."""
+    if not await redis.set(LOCK_KEY, "1", ex=300, nx=True):
+        return
+    try:
+        from . import ingest_regional, pipeline
+        n = await run_regional(redis, storage)
+        write_status(regions=sorted(pipeline.REGIONS["domains"]), regions_computed=n,
+                     europe_frames=len((pipeline.REGIONS["europe"] or {}).get("frames", [])),
+                     opera_error=ingest_regional.LAST_OPERA_ERROR, regional_error=None)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Regional cycle failed")
+        write_status(regional_error=f"{type(exc).__name__}: {exc}"[:400])
+    finally:
+        await redis.delete(LOCK_KEY)
 
 
 async def cap_tick(redis) -> None:
@@ -109,12 +133,15 @@ async def main(once: bool) -> None:
     sched.add_job(cap_tick, "interval", seconds=settings.cap_poll_seconds, args=[redis],
                   max_instances=1, coalesce=True)
     from . import lightning
+    sched.add_job(lightning_tick, "interval", seconds=settings.lightning_poll_seconds,
+                  args=[redis, storage], max_instances=1, coalesce=True)
     if lightning.enabled():
-        sched.add_job(lightning_tick, "interval", seconds=settings.lightning_poll_seconds,
-                      args=[redis, storage], max_instances=1, coalesce=True)
         log.info("Lightning (EUMETSAT MTG LI) enabled")
     else:
         lightning.save_status(enabled=False, note="set EUMETSAT_CONSUMER_KEY / EUMETSAT_CONSUMER_SECRET")
+    if settings.regional_enabled:
+        sched.add_job(regional_tick, "interval", seconds=settings.poll_seconds, args=[redis, storage],
+                      max_instances=1, coalesce=True)
     sched.start()
     await cap_tick(redis)
     await radar_tick(redis, storage)

@@ -166,7 +166,7 @@ def _tile_bounds_merc(x: int, y: int, z: int) -> tuple[float, float, float, floa
     return left, top - size, left + size, top
 
 
-_RV_CACHE: dict[str, RadarFrame] = {}  # frame path -> decoded frame (frames are immutable)
+_RV_CACHE: dict[tuple, RadarFrame] = {}  # (frame path, bbox) -> decoded frame (frames are immutable)
 LAST_DPC_ERROR: str | None = None
 
 
@@ -187,15 +187,16 @@ class RainViewerClient:
         for p in reversed(past):
             if len(frames) == n:
                 break
-            if p["path"] not in _RV_CACHE:
+            key = (p["path"], self.bbox)
+            if key not in _RV_CACHE:
                 frame = self._frame(m["host"], p)
                 if frame is None:
                     if not frames:
                         log.info("RainViewer frame %s incomplete, using the previous one", p["time"])
                         continue
                     break  # gap in the middle: stop, keep consecutive frames only
-                _RV_CACHE[p["path"]] = frame
-            frames.append(_RV_CACHE[p["path"]])
+                _RV_CACHE[key] = frame
+            frames.append(_RV_CACHE[key])
         # tiles can be served (HTTP 200) before rendering is complete: a newest frame with far less
         # echo than the previous one is treated as incomplete and re-downloaded next time
         if len(frames) >= 2:
@@ -209,7 +210,7 @@ class RainViewerClient:
         if len(frames) < 3:
             raise IngestError("RainViewer: not enough complete frames")
         keep = {p["path"] for p in past}
-        for k in [k for k in _RV_CACHE if k not in keep]:
+        for k in [k for k in _RV_CACHE if k[0] not in keep]:
             del _RV_CACHE[k]
         return list(reversed(frames))
 
@@ -344,13 +345,13 @@ def quality_control(frames: list[RadarFrame]) -> list[RadarFrame]:
     return remove_static_clutter([clamp_reflectivity(f) for f in frames])
 
 
-def attach_rainviewer_snow(c: httpx.Client, f: RadarFrame) -> RadarFrame:
+def attach_rainviewer_snow(c: httpx.Client, f: RadarFrame, bbox=ITALY_BBOX) -> RadarFrame:
     """DPC has no precipitation-type product: borrow RainViewer's snow mask (newest complete frame),
     reprojected onto the DPC grid. Best effort: on any failure the frame is returned unchanged."""
     from rasterio.warp import Resampling, reproject
 
     try:
-        rv = RainViewerClient(c).last_frames(3)[-1]
+        rv = RainViewerClient(c, bbox=bbox).last_frames(3)[-1]
         if rv.snow is None or not rv.snow.any():
             return f
         dst = np.zeros(f.dbz.shape, dtype="float32")

@@ -43,13 +43,16 @@ def match_sql():
     - dedup: same event within its window, and never an equal/less severe radar alert within 45 min."""
     return text(f"""
 WITH t AS (SELECT * FROM {_thresholds_sql()}),
-cur AS (SELECT * FROM point_obs WHERE run_timestamp = :current_run),
-prev AS (SELECT * FROM point_obs WHERE run_timestamp =
-          (SELECT max(run_timestamp) FROM point_obs WHERE run_timestamp < :current_run)),
+cur AS (SELECT * FROM point_obs WHERE run_timestamp = :current_run AND subscription_id = ANY(:ids)),
+prev AS (SELECT DISTINCT ON (subscription_id) * FROM point_obs
+         WHERE run_timestamp < :current_run AND run_timestamp >= CAST(:current_run AS TIMESTAMPTZ) - INTERVAL '25 minutes'
+           AND subscription_id = ANY(:ids)
+         ORDER BY subscription_id, run_timestamp DESC),
 cand AS (
     SELECT pf.subscription_id, pf.event_type, pf.lead_time_minutes, pf.prob, pf.dbz
     FROM point_forecasts pf JOIN t ON t.event_type = pf.event_type
-    WHERE pf.run_timestamp = :current_run AND pf.lead_time_minutes BETWEEN 5 AND t.max_lead AND pf.prob >= t.p
+    WHERE pf.run_timestamp = :current_run AND pf.subscription_id = ANY(:ids)
+      AND pf.lead_time_minutes BETWEEN 5 AND t.max_lead AND pf.prob >= t.p
     UNION ALL
     SELECT c.subscription_id, CASE WHEN c.snow THEN 'SNOW' ELSE 'RAIN_START' END, 0, 1.0, c.dbz
     FROM cur c JOIN prev p ON p.subscription_id = c.subscription_id
@@ -81,17 +84,27 @@ ORDER BY u.id, t.rnk DESC, cand.lead_time_minutes ASC, cand.prob DESC
 """)
 
 
-CAP_MATCH_SQL = text("""
-SELECT u.id AS user_id, u.endpoint, u.p256dh, u.auth,
+CAP_RANK = "(CASE c.severity WHEN 'Extreme' THEN 3 WHEN 'Severe' THEN 2 ELSE 1 END)"
+# one warning per user and hazard (national services often issue several overlapping warnings), never
+# again the same warning, and no repeat of a hazard at equal/lower level within 12 h
+CAP_MATCH_SQL = text(f"""
+SELECT DISTINCT ON (u.id, c.event_type)
+       u.id AS user_id, u.endpoint, u.p256dh, u.auth,
        u.quiet_hours_start, u.quiet_hours_end, u.timezone,
-       c.identifier, c.event, c.event_type, c.severity, c.headline, c.area_desc, c.onset, c.expires
+       c.identifier, c.event, c.event_type, c.severity, c.headline, c.area_desc, c.onset, c.expires, c.provider,
+       (SELECT a.name FROM cap_areas a WHERE ST_Intersects(a.geom, u.location)
+         ORDER BY ST_Area(a.geom) LIMIT 1) AS user_area
 FROM cap_alerts c
 JOIN user_subscriptions u ON ST_Intersects(u.location, c.geom)
 WHERE (c.expires IS NULL OR c.expires > NOW())
   AND c.severity IN ('Moderate', 'Severe', 'Extreme')
   AND c.event_type = ANY(u.alert_types)
   AND NOT EXISTS (SELECT 1 FROM alert_history ah
-                  WHERE ah.subscription_id = u.id AND ah.source = 'CAP' AND ah.ref = c.identifier)
+                  WHERE ah.subscription_id = u.id AND ah.source = 'CAP'
+                    AND (ah.ref = c.identifier
+                         OR (ah.event_type = c.event_type AND ah.sent_at > NOW() - INTERVAL '12 hours'
+                             AND {sql_rank("ah.severity_level")} >= {CAP_RANK})))
+ORDER BY u.id, c.event_type, {CAP_RANK} DESC, c.onset ASC NULLS LAST
 """)
 
 
@@ -169,12 +182,12 @@ def build_cap_payload(row) -> dict:
     what = label.removeprefix("Allerta ").strip()
     colour = {"MODERATE": "gialla", "SEVERE": "arancione", "EXTREME": "rossa"}[sev]
     icon = {"MODERATE": "🟡", "SEVERE": "🟠", "EXTREME": "🔴"}[sev]
-    area = row["area_desc"] or ""
+    area = row.get("user_area") or row["area_desc"] or ""
     title = f"{icon} Allerta {colour} {what}" + (f" – {area}" if area else "")
     until = ""
     if row["expires"]:
-        until = f"Valida fino al {row['expires'].astimezone(ZoneInfo(row['timezone'] or 'Europe/Rome')):%d/%m alle %H:%M}. "
-    body = f"{until}Fonte: MeteoAlarm / Protezione Civile. Tocca per i dettagli."
+        until = f"Valida fino al {row['expires'].astimezone(ZoneInfo(row['timezone'] or 'Europe/Rome')):%d/%m alle %H:%M} (ora locale). "
+    body = f"{until}Fonte: {row.get('provider') or 'MeteoAlarm'}. Tocca per i dettagli."
     return {
         "title": title[:120], "body": body, "icon": "/icons/storm-alert.png", "badge": "/icons/badge.png",
         "tag": f"cap-{row['identifier'][-24:]}", "renotify": sev != "MODERATE",
@@ -238,8 +251,14 @@ async def deliver(session: AsyncSession, redis, batch: list[Notification]) -> in
     return sent
 
 
-async def notify_radar(session: AsyncSession, redis, run_time: datetime) -> int:
-    rows = (await session.execute(match_sql(), {"current_run": run_time,
+async def notify_radar(session: AsyncSession, redis, run_time: datetime, sub_ids: list | None = None) -> int:
+    """Alerts for the subscribers of one domain run (sub_ids = those whose point data this run stored)."""
+    if sub_ids is None:
+        sub_ids = (await session.execute(text("SELECT subscription_id FROM point_obs WHERE run_timestamp = :r"),
+                                         {"r": run_time})).scalars().all()
+    if not sub_ids:
+        return 0
+    rows = (await session.execute(match_sql(), {"current_run": run_time, "ids": list(sub_ids),
                                                 "dedup": settings.dedup_minutes})).mappings().all()
     batch = []
     for r in rows:

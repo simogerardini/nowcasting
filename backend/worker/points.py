@@ -25,11 +25,20 @@ def _win(a: np.ndarray, r: int, c: int, k: int = 1) -> np.ndarray:
     return a[max(r - k, 0):r + k + 1, max(c - k, 0):c + k + 1]
 
 
-async def store_point_data(session: AsyncSession, result, probs: dict[str, np.ndarray]) -> int:
-    subs = (await session.execute(text(
-        "SELECT id, ST_X(location) AS lon, ST_Y(location) AS lat FROM user_subscriptions"))).mappings().all()
+async def store_point_data(session: AsyncSession, result, probs: dict[str, np.ndarray],
+                           sub_ids: list | None = None) -> list:
+    """Point forecasts + observation for the subscribers inside this run's radar coverage (optionally
+    restricted to `sub_ids`). Returns the ids stored (= the subscribers this domain is responsible for)."""
+    q = "SELECT id, ST_X(location) AS lon, ST_Y(location) AS lat FROM user_subscriptions"
+    params: dict = {}
+    if sub_ids is not None:
+        if not sub_ids:
+            return []
+        q += " WHERE id = ANY(:ids)"
+        params["ids"] = list(sub_ids)
+    subs = (await session.execute(text(q), params)).mappings().all()
     run = result.run_time
-    fc_rows, obs_rows = [], []
+    fc_rows, obs_rows, stored = [], [], []
     obs_snow = result.observed[-1].snow if result.observed else None
     for s in subs:
         px = _pixel(result, s["lon"], s["lat"])
@@ -37,7 +46,10 @@ async def store_point_data(session: AsyncSession, result, probs: dict[str, np.nd
             continue
         r, c = px
         ow = _win(np.nan_to_num(result.observed_dbz, nan=np.nan, neginf=-99.0), r, c)
-        obs_dbz = float(np.nanmax(ow)) if np.isfinite(ow).any() else None
+        if not np.isfinite(ow).any():
+            continue  # outside radar coverage: another domain (or none) serves this subscriber
+        stored.append(s["id"])
+        obs_dbz = float(np.nanmax(ow))
         snow = bool(obs_snow is not None and float(_win(obs_snow, r, c).max()) > 0.5)
         obs_rows.append({"run": run, "sid": s["id"], "dbz": obs_dbz, "snow": snow})
         for ev, p in probs.items():
@@ -64,7 +76,7 @@ async def store_point_data(session: AsyncSession, result, probs: dict[str, np.nd
                           {"run": run})
     await session.execute(text("DELETE FROM point_obs WHERE run_timestamp < CAST(:run AS TIMESTAMPTZ) - INTERVAL '30 days'"), {"run": run})
     await session.commit()
-    return len(fc_rows)
+    return stored
 
 
 VERIFY_SQL = text("""

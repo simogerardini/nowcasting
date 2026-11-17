@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import shutil
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -89,9 +90,7 @@ class Storage:
             if root.exists():
                 for d in root.iterdir():
                     if _run_older(f"{prefix}{d.name}/x", prefix, cutoff):
-                        for f in d.iterdir():
-                            f.unlink()
-                        d.rmdir()
+                        shutil.rmtree(d, ignore_errors=True)
                         removed += 1
         return removed
 

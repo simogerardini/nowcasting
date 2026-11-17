@@ -1,8 +1,12 @@
-"""Lightning from EUMETSAT MTG Lightning Imager (LI Level 2 Lightning Flashes, collection EO:EUM:DAT:0691).
+"""Lightning from satellites (free, official):
 
-Free official data (licence "NoConditions"), 10-minute archive products published ~1 min after the
-period ends. Needs a free EUMETSAT Data Store API key (EUMETSAT_CONSUMER_KEY / _SECRET).
-Flashes over the Italy bbox are stored in PostGIS (`lightning_flashes`) and published as GeoJSON.
+* EUMETSAT MTG Lightning Imager (LI Level 2 Lightning Flashes, collection EO:EUM:DAT:0691, licence
+  "NoConditions"): Europe, Africa, Middle East, Atlantic, eastern South America. 10-minute products
+  published ~1 min after the period ends; needs a free EUMETSAT Data Store key.
+* NOAA GOES-19 / GOES-18 Geostationary Lightning Mapper (GLM L2 LCFA, public AWS bucket, no key):
+  the Americas; read only while a regional domain over the Americas is active.
+Flashes over Europe and over the active regional domains are stored in PostGIS (`lightning_flashes`)
+and published as GeoJSON.
 """
 from __future__ import annotations
 
@@ -26,7 +30,8 @@ settings = get_settings()
 
 API = "https://api.eumetsat.int"
 COLLECTION = "EO:EUM:DAT:0691"  # LI Lightning Flashes - MTG - 0 degree
-BBOX = (5.5, 35.0, 19.5, 48.0)   # lon_min, lat_min, lon_max, lat_max (Italy + neighbours)
+BBOX = (-25.0, 30.0, 45.0, 72.0)   # lon_min, lat_min, lon_max, lat_max (Europe)
+EXTRA_BBOXES: list[tuple[float, float, float, float]] = []  # active regional domains (set by the pipeline)
 EPOCH_2000 = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 _token: tuple[str, float] | None = None
@@ -79,7 +84,7 @@ def parse_lfl_netcdf(data: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
             return None
 
         vlat, vlon = var("latitude", "lat", "flash_lat"), var("longitude", "lon", "flash_lon")
-        vt = var("flash_time", "time", "flash_start_time")
+        vt = var("flash_time", "flash_time_offset_of_first_event", "time", "flash_start_time")
         if vlat is None or vlon is None or vt is None:
             raise ValueError(f"unexpected LFL variables: {sorted(names)[:30]}")
         lat = np.ma.filled(vlat[:].astype("float64"), np.nan)
@@ -92,7 +97,7 @@ def parse_lfl_netcdf(data: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
                              for d in np.atleast_1d(dts)], dtype="float64")
         else:
             secs = EPOCH_2000.timestamp() + traw
-        vr = var("radiance", "flash_radiance")
+        vr = var("radiance", "flash_radiance", "flash_energy")
         rad = np.ma.filled(vr[:].astype("float64"), np.nan) if vr is not None else None
     return lat, lon, secs, rad
 
@@ -105,16 +110,22 @@ def _flashes_from_zip(content: bytes) -> list[tuple[float, float, float, float |
                 continue
             lat, lon, secs, rad = parse_lfl_netcdf(z.read(name))
             STATS["flashes_full_disc"] += int(np.isfinite(lat).sum())
-            m = (np.isfinite(lat) & np.isfinite(lon) & np.isfinite(secs)
-                 & (lon >= BBOX[0]) & (lon <= BBOX[2]) & (lat >= BBOX[1]) & (lat <= BBOX[3]))
-            for i in np.where(m)[0]:
-                out.append((float(lat[i]), float(lon[i]), float(secs[i]),
-                            float(rad[i]) if rad is not None and np.isfinite(rad[i]) else None))
+            out.extend(_select(lat, lon, secs, rad, [BBOX, *EXTRA_BBOXES]))
     return out
 
 
+def _select(lat, lon, secs, rad, boxes) -> list[tuple[float, float, float, float | None]]:
+    ok = np.isfinite(lat) & np.isfinite(lon) & np.isfinite(secs)
+    inside = np.zeros(lat.shape, dtype=bool)
+    for b in boxes:
+        inside |= (lon >= b[0]) & (lon <= b[2]) & (lat >= b[1]) & (lat <= b[3])
+    m = ok & inside
+    return [(float(lat[i]), float(lon[i]), float(secs[i]),
+             float(rad[i]) if rad is not None and np.isfinite(rad[i]) else None) for i in np.where(m)[0]]
+
+
 def fetch_new_flashes(lookback_min: int = 40) -> list[tuple[float, float, float, float | None]]:
-    """Download LFL products not processed yet (last `lookback_min`), return flashes over Italy."""
+    """Download LFL products not processed yet (last `lookback_min`), return flashes of interest."""
     now = datetime.now(timezone.utc)
     flashes: list = []
     with httpx.Client(timeout=60, follow_redirects=True) as c:
@@ -131,7 +142,7 @@ def fetch_new_flashes(lookback_min: int = 40) -> list[tuple[float, float, float,
             _seen[p["id"]] = time.monotonic()
             STATS["products"] += 1
             STATS["last_product"] = p["date"]
-            log.info("LI product %s: %d flashes over Italy", p["date"], len(fl))
+            log.info("LI product %s: %d flashes over Europe / active regions", p["date"], len(fl))
     for k in [k for k, v in _seen.items() if v < time.monotonic() - 6 * 3600]:
         del _seen[k]
     return flashes
@@ -158,6 +169,59 @@ async def lightning_geojson(session: AsyncSession, minutes: int = 60) -> dict:
         "geometry": {"type": "Point", "coordinates": [round(r["lon"], 4), round(r["lat"], 4)]},
         "properties": {"age_min": round((now - r["flash_time"]).total_seconds() / 60, 1)},
     } for r in rows]}
+
+
+# ------------------------------------------------------------------ GOES GLM (Americas)
+GLM_SATS = {"G19": "noaa-goes19", "G18": "noaa-goes18"}   # GOES-East (75.2 W), GOES-West (137.2 W)
+_glm_seen: dict[str, float] = {}
+
+
+def glm_boxes() -> dict[str, list]:
+    """Active regional domains over the Americas, per satellite (West of 110 W -> GOES-West)."""
+    out: dict[str, list] = {"G19": [], "G18": []}
+    for b in EXTRA_BBOXES:
+        lon = 0.5 * (b[0] + b[2])
+        if -180 <= lon <= -25 and -60 <= 0.5 * (b[1] + b[3]) <= 60:
+            out["G18" if lon < -110 else "G19"].append(b)
+    return {k: v for k, v in out.items() if v}
+
+
+def fetch_glm_flashes(lookback_min: int = 4) -> list[tuple[float, float, float, float | None]]:
+    """GLM L2 LCFA files (one per 20 s) of the last minutes not processed yet, flashes in active boxes."""
+    import re as _re
+
+    boxes = glm_boxes() if settings.glm_enabled else {}
+    if not boxes:
+        return []
+    now = datetime.now(timezone.utc)
+    flashes: list = []
+    with httpx.Client(timeout=60) as c:
+        for sat, bucket in ((s, GLM_SATS[s]) for s in boxes):
+            keys = []
+            for h in (now - timedelta(hours=1), now):
+                prefix = f"GLM-L2-LCFA/{h:%Y}/{h:%j}/{h:%H}/"
+                r = c.get(f"https://{bucket}.s3.amazonaws.com/", params={"list-type": "2", "prefix": prefix})
+                r.raise_for_status()
+                keys += _re.findall(r"<Key>([^<]+\.nc)</Key>", r.text)
+            for k in keys:
+                m = _re.search(r"_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})", k)
+                if not m or k in _glm_seen:
+                    continue
+                start = datetime.strptime("".join(m.groups()), "%Y%j%H%M%S").replace(tzinfo=timezone.utc)
+                if start < now - timedelta(minutes=lookback_min):
+                    _glm_seen[k] = time.monotonic()
+                    continue
+                r = c.get(f"https://{bucket}.s3.amazonaws.com/{k}")
+                r.raise_for_status()
+                lat, lon, secs, energy = parse_lfl_netcdf(r.content)
+                flashes.extend(_select(lat, lon, secs, energy, boxes[sat]))
+                _glm_seen[k] = time.monotonic()
+                STATS["glm_files"] = STATS.get("glm_files", 0) + 1
+    for k in [k for k, v in _glm_seen.items() if v < time.monotonic() - 3 * 3600]:
+        del _glm_seen[k]
+    if flashes:
+        log.info("GLM: %d flashes in active American regions", len(flashes))
+    return flashes
 
 
 def save_status(**kw) -> None:

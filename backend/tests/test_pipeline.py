@@ -177,12 +177,19 @@ def _fake_lfl_zip(points):
 def test_lightning_lfl_parsing():
     from worker.lightning import EPOCH_2000, _flashes_from_zip
     t = (datetime(2026, 11, 17, 15, 0, tzinfo=timezone.utc) - EPOCH_2000).total_seconds()
-    data = _fake_lfl_zip([(44.52, 11.43, t), (51.0, 0.0, t)])  # Granarolo + London (outside bbox)
+    from worker import lightning
+    # Granarolo + London (Europe: kept) + Sao Paulo (kept only while a regional domain covers it)
+    data = _fake_lfl_zip([(44.52, 11.43, t), (51.0, 0.0, t), (-23.5, -46.6, t)])
+    lightning.EXTRA_BBOXES[:] = []
     fl = _flashes_from_zip(data)
-    assert len(fl) == 1
+    assert len(fl) == 2
     lat, lon, secs, rad = fl[0]
     assert abs(lat - 44.52) < 0.01 and abs(lon - 11.43) < 0.01
     assert abs(secs - datetime(2026, 11, 17, 15, 0, tzinfo=timezone.utc).timestamp()) < 1
+    lightning.EXTRA_BBOXES[:] = [(-48.6, -25.3, -44.6, -21.7)]
+    assert len(_flashes_from_zip(data)) == 3
+    assert lightning.glm_boxes() == {"G19": [(-48.6, -25.3, -44.6, -21.7)]}
+    lightning.EXTRA_BBOXES[:] = []
 
 
 def test_calibration_mapping_monotonic():
@@ -202,3 +209,43 @@ def test_radar_payload_uses_point_intensity_and_probability():
            "point_dbz": 30.0, "timezone": "Europe/Rome", "flashes_near": 0}
     p = build_radar_payload(row, datetime(2026, 11, 17, 15, 50, tzinfo=timezone.utc))
     assert "Probabilità 80%" in p["body"] and "≥ 6 mm/h" in p["body"] and "17:10" in p["body"]
+
+
+def test_schema_splitter_keeps_dollar_blocks():
+    from app.database import split_sql
+    stmts = split_sql("CREATE TABLE a (x int);\n-- c;\nDO $$ BEGIN IF 1=1 THEN SELECT 1; SELECT 2; END IF; END $$;\nSELECT 3;")
+    assert len(stmts) == 3 and stmts[1].startswith("DO $$") and stmts[1].endswith("END $$")
+
+
+def test_regional_domain_geometry():
+    from worker.ingest_regional import cell_of, make_domain
+    d = make_domain(*cell_of(11.6, 48.1))
+    assert d.id == "R+012+048"
+    lon0, lat0, lon1, lat1 = d.bbox
+    assert lon0 < 11.6 < lon1 and lat0 < 48.1 < lat1
+    assert 3.5 < lat1 - lat0 < 3.7 and 5.0 < lon1 - lon0 < 5.6   # ~400 km square at 48 N
+
+
+def test_meteoalarm_and_nws_parsing():
+    from datetime import datetime, timedelta, timezone
+    from worker.cap import parse_meteoalarm, parse_nws
+    exp = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+    ma = {"warnings": [{"alert": {"identifier": "w1", "status": "Actual", "msgType": "Alert", "info": [
+        {"language": "de-DE", "event": "STURMBÖEN", "expires": exp, "parameter": [
+            {"valueName": "awareness_level", "value": "3; orange; Severe"},
+            {"valueName": "awareness_type", "value": "1; Wind"}],
+         "area": [{"areaDesc": "Kreis und Stadt München", "geocode": [{"valueName": "EMMA_ID", "value": "DE413"}]}]},
+        {"language": "en", "event": "gusts", "headline": "Official WARNING of GUSTS", "expires": exp, "parameter": [
+            {"valueName": "awareness_level", "value": "3; orange; Severe"},
+            {"valueName": "awareness_type", "value": "1; Wind"}],
+         "area": [{"areaDesc": "Kreis und Stadt München", "geocode": [{"valueName": "EMMA_ID", "value": "DE413"}]}]}]}},
+        {"alert": {"identifier": "w2", "status": "Actual", "info": [{"language": "en", "parameter": [
+            {"valueName": "awareness_level", "value": "1; green; Minor"}], "area": []}]}}]}
+    a = parse_meteoalarm(ma, "DE")
+    assert len(a) == 1 and a[0]["severity"] == "Severe" and a[0]["event_type"] == "CAP_WIND"
+    assert a[0]["codes"] == ["DE413"] and a[0]["geom"] is None and a[0]["headline"].startswith("Official")
+    nws = {"features": [{"id": "x", "geometry": None, "properties": {
+        "id": "urn:1", "status": "Actual", "messageType": "Alert", "event": "Severe Thunderstorm Warning",
+        "severity": "Severe", "expires": exp, "affectedZones": ["https://api.weather.gov/zones/forecast/TXZ119"]}}]}
+    n = parse_nws(nws)
+    assert n[0]["event_type"] == "CAP_THUNDERSTORM" and n[0]["codes"] == ["NWS:TXZ119"] and n[0]["country"] == "US"

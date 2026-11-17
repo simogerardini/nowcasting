@@ -15,11 +15,13 @@ export const RADAR_EVENTS: EventSpec[] = [
 ];
 
 export const LIGHTNING_EVENTS: EventSpec[] = [
-  { id: "LIGHTNING", label: "Fulmini vicini", hint: "Almeno 2 fulmini entro 15 km negli ultimi 20 min (satellite MTG)", color: "#fde047" },
+  { id: "LIGHTNING", label: "Fulmini vicini", hint: "Almeno 2 fulmini entro 15 km negli ultimi 20 min (satelliti MTG e GOES)", color: "#fde047" },
 ];
 
 export const CAP_EVENTS: EventSpec[] = [
   { id: "CAP_THUNDERSTORM", label: "Temporali", hint: "", color: "#a855f7" },
+  { id: "CAP_TORNADO", label: "Tornado", hint: "", color: "#a855f7" },
+  { id: "CAP_TROPICAL", label: "Uragani / tempeste tropicali", hint: "", color: "#a855f7" },
   { id: "CAP_RAIN", label: "Pioggia / alluvione", hint: "", color: "#a855f7" },
   { id: "CAP_WIND", label: "Vento", hint: "", color: "#a855f7" },
   { id: "CAP_SNOW_ICE", label: "Neve / ghiaccio", hint: "", color: "#a855f7" },
@@ -31,7 +33,9 @@ export const CAP_EVENTS: EventSpec[] = [
   { id: "CAP_AVALANCHE", label: "Valanghe", hint: "", color: "#a855f7" },
 ];
 
-export const DEFAULT_ALERT_TYPES = ["HEAVY_RAIN", "CLOUDBURST", "HAIL", "CAP_THUNDERSTORM", "CAP_RAIN", "CAP_WIND"];
+export const DEFAULT_ALERT_TYPES = [
+  "HEAVY_RAIN", "CLOUDBURST", "HAIL", "CAP_THUNDERSTORM", "CAP_TORNADO", "CAP_TROPICAL", "CAP_RAIN", "CAP_WIND",
+];
 
 export const EVENT_BY_ID: Record<string, EventSpec> = Object.fromEntries(
   [...RADAR_EVENTS, ...LIGHTNING_EVENTS, ...CAP_EVENTS].map((e) => [e.id, e]),

@@ -1,6 +1,7 @@
 # Noctalix Nowcast — `nowcast.noctalix.com`
 
 PWA di allerta precoce (nowcasting 0–60 min) per nubifragi, celle temporalesche e grandine, con avvisi Web Push geolocalizzati.
+Copertura: Italia (radar DPC, 1 km), Europa (radar EUMETNET OPERA, 1 km), resto del mondo (RainViewer); allerte ufficiali MeteoAlarm (38 paesi europei) e NWS (USA); fulmini MTG (Europa/Africa/Atlantico) e GOES GLM (Americhe).
 Specifica completa: [`ARCHITECTURE_AND_SPEC.md`](ARCHITECTURE_AND_SPEC.md).
 
 ```
@@ -15,8 +16,9 @@ backend/   FastAPI + worker pySTEPS (LK + S-PROG) + PostGIS + Redis → VPS (doc
 3. `vectorizer.py` – contorni 35/45/55 dBZ, buffer `1.5 + 0.1·lead` km (EPSG:3035), PostGIS `forecast_polygons` (retention 2 h), PNG Web-Mercator dei frame −25…+60 min, `latest.json` + `latest_forecast.geojson` (gzip) su R2.
 3b. `probability.py` + `points.py` – **nowcast probabilistico calibrato**: probabilità di superamento per evento e anticipo (Lagrangiano locale, Germann & Zawadzki), mappate con tabelle di affidabilità da backtest (`worker/data/calibration.json`, vedi [`docs/CALIBRATION.md`](docs/CALIBRATION.md)); previsione e osservazione **sul punto di ogni iscritto**; ogni avviso viene verificato col radar osservato (`GET /api/v1/verification`).
 4. `notifier.py` – query `ST_Intersects`, priorità al lead time più breve, dedup 45 min con *upgrade* di severità, quiet hours (solo MODERATE silenziati, nel fuso dell'utente), rimozione endpoint 404/410, lock Redis anti-duplicati.
-5. `lightning.py` – fulmini da **EUMETSAT MTG Lightning Imager** (LI-2-LFL, collezione `EO:EUM:DAT:0691`, licenza NoConditions): prodotti ogni 10 min, filtro area Italia, tabella `lightning_flashes` (3 h), `lightning.geojson`, avviso "Fulmini vicini" (≥2 fulmini entro 15 km in 20 min, tendenza avvicinamento) e menzione dei fulmini negli avvisi radar. Richiede secret `EUMETSAT_CONSUMER_KEY` / `EUMETSAT_CONSUMER_SECRET`. Blitzortung non usato: vieta l'accesso da app di terzi senza approvazione.
-6. `cap.py` – feed CAP MeteoAlarm Italia ogni 10 min → `cap_alerts` + push una tantum per allerta.
+5. `lightning.py` – fulmini da **EUMETSAT MTG Lightning Imager** (LI-2-LFL, collezione `EO:EUM:DAT:0691`, licenza NoConditions): prodotti ogni 10 min, area Europa + regioni attive; **NOAA GOES-19/18 GLM** (bucket AWS pubblico, file ogni 20 s) solo mentre c'è una regione attiva nelle Americhe. Tabella `lightning_flashes` (3 h), `lightning.geojson`, avviso "Fulmini vicini" (≥2 fulmini entro 15 km in 20 min, tendenza avvicinamento) e menzione dei fulmini negli avvisi radar. MTG richiede secret `EUMETSAT_CONSUMER_KEY` / `EUMETSAT_CONSUMER_SECRET`. Asia/Oceania: nessuna fonte gratuita. Blitzortung non usato: vieta l'accesso da app di terzi senza approvazione.
+6. `cap.py` – allerte ufficiali ogni 10 min: API JSON MeteoAlarm per l'Italia e per i paesi in cui l'app è usata (iscritti + visitatori recenti), NWS `alerts/active?point=` negli USA. Geometria: poligoni CAP, altrimenti aree EMMA_ID (`worker/data/emma_areas.geojson.gz`, caricate in `cap_areas`) o zone NWS (scaricate una volta e messe in cache). Push una tantum per allerta, una sola per tipo di rischio (niente doppioni per avvisi sovrapposti).
+7. **Regioni fuori Italia** (`ingest_regional.py`, `pipeline.run_regional`, ogni 60 s): per ogni cella di 1° con iscritti fuori dalla copertura DPC o visitatori recenti (`coverage_demand`, posizione arrotondata a ~10 km, nessuna identità) viene calcolato un nowcast completo (stessa catena: LK + S-PROG, probabilità calibrate, avvisi sul punto) su un quadrato di ~400 km: radar **OPERA CIRRUS** (DBZH 1 km/5 min, CC BY 4.0, cache S3 ORD anonima, lettura a finestra del COG) in Europa, **RainViewer** altrove. Max `MAX_REGIONAL_DOMAINS` (6). Mappa: `regions.json` con i frame previsti di ogni regione + composito OPERA Europa osservato (panoramica 4 km); fuori Europa la PWA mostra le tile RainViewer osservate.
 
 ## API (`https://api-nowcast.noctalix.com`)
 
@@ -29,7 +31,7 @@ backend/   FastAPI + worker pySTEPS (LK + S-PROG) + PostGIS + Redis → VPS (doc
 | PATCH | `/api/v1/settings` | soglia dBZ / quiet hours / fuso |
 | PATCH | `/api/v1/resubscribe` | rotazione endpoint dal service worker (`pushsubscriptionchange`) |
 | DELETE | `/api/v1/unsubscribe` | |
-| GET | `/api/v1/alerts/point?lat=&lon=` | impatti previsti + allerte CAP su un punto |
+| GET | `/api/v1/alerts/point?lat=&lon=` | impatti previsti (tutte le regioni) + allerte CAP su un punto; registra la cella (~10 km) come zona da coprire |
 
 Chiavi VAPID: se `VAPID_*` è vuoto vengono generate al primo avvio e salvate in `/data/vapid.json` (volume), condivise da api e worker.
 
@@ -84,6 +86,8 @@ Consigliato: GitHub → Settings → Billing → Budgets → budget Actions 0 $ 
 - Repository effettivo: `simogerardini/nowcasting`.
 - Colonne aggiuntive: `user_subscriptions.timezone` (quiet hours nel fuso utente), `alert_history.source/ref` (dedup CAP); tabelle `cap_alerts`, `pipeline_runs`.
 - Dedup: blocca severità uguale **o inferiore** nei 45 min (la query della spec lasciava passare i downgrade).
-- Allerte CAP Italia: MeteoAlarm usa geocode EMMA_ID senza poligoni; i poligoni vengono letti se presenti, altrimenti da un GeoJSON di geocode opzionale (`CAP_GEOCODES_URL` / `/data/cap_geocodes.geojson`). Senza questo file le allerte CAP non georeferenziate vengono ignorate.
+- Allerte CAP: MeteoAlarm usa geocode EMMA_ID quasi sempre senza poligoni: i confini (2003 aree, 36 paesi) vengono da `geocodes.json` del pacchetto MIT `meteoalarm` (rigenerabili con `backend/scripts/build_cap_areas.py`); UK/Svizzera/Ucraina pubblicano poligoni.
 - Blitzortung (fase 2) non implementato.
+- Calibrazione probabilistica stimata sul radar DPC, applicata anche a OPERA e RainViewer; la verifica online (`/api/v1/verification`) misura l'affidabilità reale anche fuori Italia.
+- Zone senza radar (gran parte di Africa, Asia centrale, oceani): RainViewer non distingue "asciutto" da "non coperto", quindi lì non arrivano avvisi radar.
 - Fonte radar attiva e motivo di eventuale fallback visibili in `/api/v1/health` (`last_run.source`, `worker.dpc_error`).

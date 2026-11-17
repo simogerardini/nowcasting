@@ -116,3 +116,34 @@ ALTER TABLE forecast_polygons ENABLE ROW LEVEL SECURITY;
 ALTER TABLE alert_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cap_alerts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_runs ENABLE ROW LEVEL SECURITY;
+
+-- v5: Europe / world coverage (regional nowcast domains, multi-provider CAP alerts)
+ALTER TABLE forecast_polygons ADD COLUMN IF NOT EXISTS domain VARCHAR(24) NOT NULL DEFAULT 'IT';
+CREATE INDEX IF NOT EXISTS idx_forecast_domain_run ON forecast_polygons (domain, run_timestamp);
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS domain VARCHAR(24) NOT NULL DEFAULT 'IT';
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pipeline_runs_pkey'
+             AND conrelid = 'pipeline_runs'::regclass AND array_length(conkey, 1) = 1) THEN
+    ALTER TABLE pipeline_runs DROP CONSTRAINT pipeline_runs_pkey;
+    ALTER TABLE pipeline_runs ADD CONSTRAINT pipeline_runs_pkey PRIMARY KEY (run_timestamp, domain);
+  END IF;
+END $$;
+ALTER TABLE cap_alerts ADD COLUMN IF NOT EXISTS provider VARCHAR(32) NULL;
+ALTER TABLE cap_alerts ADD COLUMN IF NOT EXISTS country VARCHAR(4) NULL;
+-- warning areas referenced by geocode (MeteoAlarm EMMA_ID, NWS zones): loaded once, cached
+CREATE TABLE IF NOT EXISTS cap_areas (
+    code TEXT PRIMARY KEY,
+    country VARCHAR(4) NULL,
+    name TEXT NULL,
+    geom GEOMETRY(MultiPolygon, 4326) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cap_areas_geom ON cap_areas USING GIST (geom);
+ALTER TABLE cap_areas ENABLE ROW LEVEL SECURITY;
+-- where the app is being looked at (no identity: rounded cell only) -> on-demand regional nowcasts
+CREATE TABLE IF NOT EXISTS coverage_demand (
+    cell VARCHAR(16) PRIMARY KEY,
+    lon REAL NOT NULL,
+    lat REAL NOT NULL,
+    last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE coverage_demand ENABLE ROW LEVEL SECURITY;

@@ -21,28 +21,31 @@ RADAR_EVENTS: dict[str, dict] = {
              "label": "Neve", "title": "❄️ Neve in arrivo"},
 }
 
-# Lightning (EUMETSAT MTG Lightning Imager): observed flashes near the user, last ~20 min
+# Lightning (EUMETSAT MTG Lightning Imager; NOAA GOES GLM over the Americas): flashes near the user, last ~20 min
 LIGHTNING_EVENTS: dict[str, dict] = {
     "LIGHTNING": {"severity": "SEVERE", "dedup_min": 60, "label": "Fulmini vicini",
                   "title": "⚡ Fulmini vicino a te"},
 }
 
-# Institutional CAP warnings (MeteoAlarm / Protezione Civile), hours to ~2 days ahead.
-CAP_EVENTS: dict[str, dict] = {
+# Institutional CAP warnings (MeteoAlarm in Europe, NWS in the USA), hours to ~2 days ahead.
+CAP_EVENTS: dict[str, dict] = {  # order = match priority
     "CAP_THUNDERSTORM": {"label": "Allerta temporali", "match": r"thunderstorm"},
+    "CAP_TORNADO": {"label": "Allerta tornado", "match": r"tornado|waterspout"},
+    "CAP_TROPICAL": {"label": "Allerta uragano / tempesta tropicale", "match": r"hurricane|tropical|typhoon|cyclone"},
+    "CAP_COASTAL": {"label": "Allerta mareggiate", "match": r"coastal|storm.?surge|high.?surf"},
     "CAP_RAIN": {"label": "Allerta pioggia / alluvione", "match": r"rain|flood"},
+    "CAP_COLD": {"label": "Allerta freddo", "match": r"low.?temperature|cold|frost|freez|wind.?chill"},
+    "CAP_SNOW_ICE": {"label": "Allerta neve / ghiaccio", "match": r"snow|\bice\b|winter|blizzard|sleet"},
     "CAP_WIND": {"label": "Allerta vento", "match": r"wind"},
-    "CAP_SNOW_ICE": {"label": "Allerta neve / ghiaccio", "match": r"snow|ice"},
     "CAP_FOG": {"label": "Allerta nebbia", "match": r"fog"},
     "CAP_HEAT": {"label": "Allerta caldo", "match": r"high.?temperature|heat"},
-    "CAP_COLD": {"label": "Allerta freddo", "match": r"low.?temperature|cold"},
-    "CAP_COASTAL": {"label": "Allerta mareggiate", "match": r"coastal"},
-    "CAP_FOREST_FIRE": {"label": "Allerta incendi boschivi", "match": r"forest.?fire|fire"},
+    "CAP_FOREST_FIRE": {"label": "Allerta incendi boschivi", "match": r"forest.?fire|fire|red.?flag"},
     "CAP_AVALANCHE": {"label": "Allerta valanghe", "match": r"avalanche"},
 }
 
 ALL_EVENTS = set(RADAR_EVENTS) | set(CAP_EVENTS) | set(LIGHTNING_EVENTS)
-DEFAULT_ALERT_TYPES = ["HEAVY_RAIN", "CLOUDBURST", "HAIL", "CAP_THUNDERSTORM", "CAP_RAIN", "CAP_WIND"]
+DEFAULT_ALERT_TYPES = ["HEAVY_RAIN", "CLOUDBURST", "HAIL", "CAP_THUNDERSTORM", "CAP_TORNADO", "CAP_TROPICAL",
+                       "CAP_RAIN", "CAP_WIND"]
 
 # vectorized threshold (dBZ) -> radar event (rain events; SNOW handled separately via snow mask)
 THRESHOLD_EVENTS = {v["dbz"]: k for k, v in RADAR_EVENTS.items() if k != "SNOW"}

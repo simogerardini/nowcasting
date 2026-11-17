@@ -12,7 +12,10 @@ export interface PointAlerts {
     estimated_rain_mmh: number;
     prob: number | null;
   }[];
-  cap: { identifier: string; event: string; event_type: string | null; severity: string; headline: string | null; expires?: string | null }[];
+  cap: {
+    identifier: string; event: string; event_type: string | null; severity: string; headline: string | null;
+    expires?: string | null; provider?: string | null;
+  }[];
 }
 
 interface Item {
@@ -56,13 +59,20 @@ function buildItems(a: PointAlerts | null): Item[] {
       color: ev?.color ?? "#facc15", rank: RANK[next.severity_level] ?? 0,
     });
   }
+  // one item per hazard (national services often issue several overlapping warnings): keep the highest level
+  const byType = new Map<string, PointAlerts["cap"][number]>();
   for (const c of a.cap) {
+    const k = c.event_type ?? c.event;
+    const prev = byType.get(k);
+    if (!prev || (CAP_LEVEL[c.severity]?.rank ?? 1) > (CAP_LEVEL[prev.severity]?.rank ?? 1)) byType.set(k, c);
+  }
+  for (const c of byType.values()) {
     const lvl = CAP_LEVEL[c.severity] ?? CAP_LEVEL.Moderate;
     const what = (CAP_EVENTS.find((e) => e.id === c.event_type)?.label ?? "meteo").toLowerCase();
     const until = c.expires ? ` fino al ${new Date(c.expires).toLocaleString("it-IT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}` : "";
     items.push({
       key: c.identifier, icon: lvl.icon, short: `Allerta ${what}`,
-      long: `Allerta ${lvl.name} ${what}${until} (Protezione Civile / MeteoAlarm)`, color: lvl.color, rank: lvl.rank,
+      long: `Allerta ${lvl.name} ${what}${until} (${c.provider ?? "MeteoAlarm"})`, color: lvl.color, rank: lvl.rank,
     });
   }
   return items.sort((x, y) => y.rank - x.rank);

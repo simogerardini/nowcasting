@@ -169,19 +169,19 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
 
           <fieldset>
             <legend className="mb-1 font-semibold">Radar · prossimi 60 minuti</legend>
-            <p className="mb-2 text-xs text-slate-400">Previsione sulla tua posizione, aggiornata ogni 10 min. Più affidabile entro 30 min.</p>
+            <p className="mb-2 text-xs text-slate-400">Previsione sulla tua posizione, aggiornata ogni 5–10 min. Più affidabile entro 30 min. Italia: radar Protezione Civile · Europa: radar OPERA · resto del mondo: RainViewer.</p>
             <Checks items={RADAR_EVENTS} selected={prefs.alert_types} onToggle={toggleType} />
           </fieldset>
 
           <fieldset>
             <legend className="mb-1 font-semibold">Fulmini · satellite</legend>
-            <p className="mb-2 text-xs text-slate-400">Fulmini osservati dal satellite europeo MTG (EUMETSAT), ritardo 2–12 min.</p>
+            <p className="mb-2 text-xs text-slate-400">Europa, Africa e Atlantico: satellite MTG (EUMETSAT), ritardo 2–12 min. Americhe: satelliti GOES (NOAA), ritardo ~1 min. Non disponibile in Asia e Oceania.</p>
             <Checks items={LIGHTNING_EVENTS} selected={prefs.alert_types} onToggle={toggleType} />
           </fieldset>
 
           <fieldset>
             <legend className="mb-1 font-semibold">Allerte ufficiali · fino a 1–2 giorni</legend>
-            <p className="mb-2 text-xs text-slate-400">MeteoAlarm / Protezione Civile per la tua regione (gialla, arancione, rossa).</p>
+            <p className="mb-2 text-xs text-slate-400">Allerte gialle, arancioni e rosse per la tua zona: MeteoAlarm in 38 paesi europei (in Italia Protezione Civile), National Weather Service negli Stati Uniti.</p>
             <Checks items={CAP_EVENTS} selected={prefs.alert_types} onToggle={toggleType} cols={2} />
           </fieldset>
 
@@ -225,10 +225,12 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
           {msg && <p className="text-xs text-sky-200">{msg}</p>}
 
           <p className="border-t border-white/10 pt-3 text-[11px] leading-relaxed text-slate-500">
-            Dati: radar © <a className="underline" href="https://radar.protezionecivile.it" target="_blank" rel="noreferrer">Dipartimento Protezione Civile</a>
-            {" "}· RainViewer · fulmini © EUMETSAT (MTG Lightning Imager) · allerte MeteoAlarm · mappa ©{" "}
+            Dati: radar Italia © <a className="underline" href="https://radar.protezionecivile.it" target="_blank" rel="noreferrer">Dipartimento Protezione Civile</a>
+            {" "}· radar Europa ©{" "}
+            <a className="underline" href="https://www.eumetnet.eu/observations/weather-radar-network/" target="_blank" rel="noreferrer">EUMETNET OPERA</a> (CC BY 4.0)
+            {" "}· radar mondo RainViewer · fulmini © EUMETSAT (MTG) e NOAA (GOES GLM) · allerte MeteoAlarm (EUMETNET) e NWS (NOAA) · mappa ©{" "}
             <a className="underline" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>, OpenMapTiles,{" "}
-            <a className="underline" href="https://openfreemap.org" target="_blank" rel="noreferrer">OpenFreeMap</a> · confini ISTAT.
+            <a className="underline" href="https://openfreemap.org" target="_blank" rel="noreferrer">OpenFreeMap</a> · confini ISTAT, MeteoAlarm.
           </p>
         </div>
       )}

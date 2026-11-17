@@ -66,6 +66,42 @@ async function loadBasemap(): Promise<maplibregl.StyleSpecification> {
   }
 }
 
+interface RegionDomain {
+  id: string;
+  source: string;
+  run_timestamp: string;
+  coordinates: Manifest["coordinates"];
+  frames: Frame[];
+}
+
+interface Regions {
+  domains: RegionDomain[];
+  europe: { coordinates: Manifest["coordinates"]; frames: { time: string; url: string }[] } | null;
+}
+
+interface RvFrame {
+  time: number; // ms
+  tiles: string;
+}
+
+// Where the OPERA (EUMETNET) composite is dense: outside, observed radar comes from RainViewer tiles
+const EUROPE_BOX = { w: -11, s: 34.5, e: 33, n: 71 };
+const RAINVIEWER_MAPS = "https://api.rainviewer.com/public/weather-maps.json";
+const STEP_TOL = 5.5 * 60_000;
+
+function nearest<T extends { time: string }>(frames: T[], t: number, tol = STEP_TOL): T | undefined {
+  let best: T | undefined;
+  let bd = Infinity;
+  for (const f of frames) {
+    const d = Math.abs(Date.parse(f.time) - t);
+    if (d < bd) {
+      bd = d;
+      best = f;
+    }
+  }
+  return bd <= tol ? best : undefined;
+}
+
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 const REFRESH_MS = 60_000;
 
@@ -79,6 +115,9 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
   const marker = useRef<maplibregl.Marker | null>(null);
   const [ready, setReady] = useState(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
+  const [regions, setRegions] = useState<Regions | null>(null);
+  const [rv, setRv] = useState<RvFrame[]>([]);
+  const [outsideEurope, setOutsideEurope] = useState(false);
   const [idx, setIdx] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const centred = useRef(false);
@@ -109,6 +148,16 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     m.on("load", () => {
+      // z-order anchors for the radar layers (bottom -> top): RainViewer world, OPERA Europe, DPC Italy, regions
+      for (const id of ["z-rv", "z-eu", "z-it", "z-dom"]) {
+        m.addLayer({ id, type: "background", layout: { visibility: "none" }, paint: { "background-opacity": 0 } });
+      }
+      const updateArea = () => {
+        const c = m.getCenter();
+        setOutsideEurope(!(c.lng >= EUROPE_BOX.w && c.lng <= EUROPE_BOX.e && c.lat >= EUROPE_BOX.s && c.lat <= EUROPE_BOX.n));
+      };
+      m.on("moveend", updateArea);
+      updateArea();
       m.addSource("risk", { type: "geojson", data: EMPTY_FC });
       m.addSource("lightning", { type: "geojson", data: EMPTY_FC });
       m.addSource("cap", { type: "geojson", data: EMPTY_FC });
@@ -116,13 +165,13 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
         id: "cap-fill",
         type: "fill",
         source: "cap",
-        paint: { "fill-color": "#a855f7", "fill-opacity": 0.12 },
+        paint: { "fill-color": "#a855f7", "fill-opacity": 0.05 },
       });
       m.addLayer({
         id: "cap-line",
         type: "line",
         source: "cap",
-        paint: { "line-color": "#a855f7", "line-width": 1.5, "line-dasharray": [2, 2] },
+        paint: { "line-color": "#a855f7", "line-opacity": 0.6, "line-width": 1.2, "line-dasharray": [2, 2] },
       });
       const sevColor: maplibregl.ExpressionSpecification = [
         "match", ["get", "event_type"],
@@ -195,6 +244,35 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
         return mf;
       });
       setError(null);
+      const rg = await fetch(`${assetsUrl}/regions.json?t=${Math.floor(Date.now() / 60000)}`)
+        .then((x) => (x.ok ? x.json() : null))
+        .catch(() => null);
+      if (rg) {
+        rg.domains?.forEach((d: RegionDomain) => d.frames.forEach((f) => (f.url = abs(f.url))));
+        rg.europe?.frames.forEach((f: { url: string }) => (f.url = abs(f.url)));
+        setRegions((prev) => {
+          const seen = new Set([...(prev?.europe?.frames ?? []), ...(prev?.domains ?? []).flatMap((d) => d.frames)].map((f) => f.url));
+          [...(rg.europe?.frames ?? []), ...(rg.domains ?? []).flatMap((d: RegionDomain) => d.frames)]
+            .filter((f: { url: string }) => !seen.has(f.url))
+            .forEach((f: { url: string }) => {
+              const img = new Image();
+              img.crossOrigin = "anonymous";
+              img.src = f.url; // preload
+            });
+          return rg;
+        });
+      }
+      const rvm = await fetch(RAINVIEWER_MAPS)
+        .then((x) => (x.ok ? x.json() : null))
+        .catch(() => null);
+      if (rvm?.radar?.past?.length) {
+        setRv(
+          (rvm.radar.past as { time: number; path: string }[]).slice(-6).map((p) => ({
+            time: p.time * 1000,
+            tiles: `${rvm.host}${p.path}/256/{z}/{x}/{y}/2/1_1.png`,
+          })),
+        );
+      }
       const m = map.current;
       if (!m) return;
       const [risk, cap] = await Promise.all([
@@ -233,7 +311,7 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
       m.addSource("radar", { type: "image", url: frame.url, coordinates: manifest.coordinates });
       m.addLayer(
         { id: "radar", type: "raster", source: "radar", paint: { "raster-opacity": 0.75, "raster-fade-duration": 0, "raster-resampling": "linear" } },
-        "cap-fill",
+        "z-it",
       );
     }
     const lead = frame.kind === "forecast" ? frame.offset_min : -1;
@@ -244,6 +322,77 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     m.setFilter("risk-fill", filter);
     m.setFilter("risk-line", filter);
   }, [ready, manifest, frame]);
+
+  // ---------------------------------------------------------------- Europe / world / regional layers
+  const RASTER_PAINT = { "raster-fade-duration": 0, "raster-resampling": "linear" } as const;
+  function showImage(m: MlMap, id: string, url: string | undefined, coords: Manifest["coordinates"] | undefined, before: string) {
+    const layer = m.getLayer(id);
+    if (!url || !coords) {
+      if (layer) m.setPaintProperty(id, "raster-opacity", 0);
+      return;
+    }
+    const src = m.getSource(id) as ImageSource | undefined;
+    if (src) src.updateImage({ url, coordinates: coords });
+    else m.addSource(id, { type: "image", url, coordinates: coords });
+    if (!layer) m.addLayer({ id, type: "raster", source: id, paint: { ...RASTER_PAINT, "raster-opacity": 0.75 } }, before);
+    else m.setPaintProperty(id, "raster-opacity", 0.75);
+  }
+
+  // RainViewer tile layers: one per past frame, toggled by opacity (no re-download while animating)
+  useEffect(() => {
+    const m = map.current;
+    if (!ready || !m) return;
+    const keep = new Set(rv.map((f) => `rv-${f.time}`));
+    for (const l of m.getStyle().layers ?? []) {
+      if (l.id.startsWith("rv-") && !keep.has(l.id)) {
+        m.removeLayer(l.id);
+        m.removeSource(l.id);
+      }
+    }
+    for (const f of rv) {
+      const id = `rv-${f.time}`;
+      if (m.getSource(id)) continue;
+      m.addSource(id, { type: "raster", tiles: [f.tiles], tileSize: 256, maxzoom: 7, attribution: "RainViewer" });
+      m.addLayer(
+        { id, type: "raster", source: id, layout: { visibility: "none" }, paint: { ...RASTER_PAINT, "raster-opacity": 0 } },
+        "z-rv",
+      );
+    }
+  }, [ready, rv]);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!ready || !m || !frame) return;
+    const t = Date.parse(frame.time);
+    const observed = frame.kind === "observed";
+    // OPERA Europe: observed steps only
+    const eu = regions?.europe;
+    const ef = observed && eu ? nearest(eu.frames, t) : undefined;
+    showImage(m, "europe", ef?.url, eu?.coordinates, "z-eu");
+    // RainViewer (outside Europe): newest frame not after this step, within 10 min
+    const cand = rv.filter((f) => f.time <= t + 60_000 && t - f.time <= 10 * 60_000).pop();
+    for (const f of rv) {
+      const id = `rv-${f.time}`;
+      if (!m.getLayer(id)) continue;
+      // hidden layers download no tiles: RainViewer is only used away from Europe
+      m.setLayoutProperty(id, "visibility", outsideEurope ? "visible" : "none");
+      m.setPaintProperty(id, "raster-opacity", observed && cand === f ? 0.7 : 0);
+    }
+    // regional nowcasts: forecast steps
+    const ids = new Set<string>();
+    for (const d of regions?.domains ?? []) {
+      const id = `dom-${d.id}`;
+      ids.add(id);
+      const f = observed ? undefined : nearest(d.frames, t);
+      showImage(m, id, f?.url, d.coordinates, "z-dom");
+    }
+    for (const l of m.getStyle().layers ?? []) {
+      if (l.id.startsWith("dom-") && !ids.has(l.id)) {
+        m.removeLayer(l.id);
+        m.removeSource(l.id);
+      }
+    }
+  }, [ready, frame, regions, rv, outsideEurope]);
 
   // ---------------------------------------------------------------- animation
   useEffect(() => {

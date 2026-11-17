@@ -81,8 +81,13 @@ async def health(session: AsyncSession = Depends(get_session)):
         out["database"] = "ok"
         row = (await session.execute(text(
             "SELECT run_timestamp, source, frames, polygons, notifications, duration_s, finished_at "
-            "FROM pipeline_runs ORDER BY run_timestamp DESC LIMIT 1"))).mappings().first()
+            "FROM pipeline_runs WHERE domain = 'IT' ORDER BY run_timestamp DESC LIMIT 1"))).mappings().first()
         out["last_run"] = dict(row) if row else None
+        regions = (await session.execute(text(
+            "SELECT DISTINCT ON (domain) domain, run_timestamp, source, polygons, notifications, duration_s "
+            "FROM pipeline_runs WHERE domain <> 'IT' AND run_timestamp > NOW() - INTERVAL '2 hours' "
+            "ORDER BY domain, run_timestamp DESC"))).mappings().all()
+        out["regions"] = [dict(r) for r in regions]
         out["subscriptions"] = (await session.execute(text("SELECT count(*) FROM user_subscriptions"))).scalar()
     except Exception as exc:  # noqa: BLE001
         out["database"] = f"error: {exc.__class__.__name__}"
@@ -228,16 +233,26 @@ async def alerts_at_point(lat: float, lon: float, session: AsyncSession = Depend
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise HTTPException(422, "invalid coordinates")
     params = {"lat": lat, "lon": lon}
+    # a viewer here (rounded to ~10 km, no identity) keeps a regional nowcast running for this area
+    await session.execute(text("""
+        INSERT INTO coverage_demand (cell, lon, lat, last_seen) VALUES (:cell, :rlon, :rlat, NOW())
+        ON CONFLICT (cell) DO UPDATE SET lon = EXCLUDED.lon, lat = EXCLUDED.lat, last_seen = NOW()"""),
+        {"cell": f"{round(lon):+04d}{round(lat):+03d}", "rlon": round(lon, 1), "rlat": round(lat, 1)})
+    await session.commit()
     radar = (await session.execute(text("""
-        SELECT f.lead_time_minutes, f.severity_level, f.event_type, f.max_dbz, f.estimated_rain_mmh, f.prob, f.run_timestamp
-        FROM forecast_polygons f
-        WHERE f.run_timestamp = (SELECT max(run_timestamp) FROM forecast_polygons)
-          AND ST_Intersects(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), f.geom)
-        ORDER BY f.lead_time_minutes ASC,
-                 (CASE f.severity_level WHEN 'EXTREME' THEN 3 WHEN 'SEVERE' THEN 2
-                  WHEN 'MODERATE' THEN 1 ELSE 0 END) DESC"""), params)).mappings().all()
+        WITH latest AS (SELECT domain, max(run_timestamp) AS run FROM forecast_polygons
+                        WHERE run_timestamp > NOW() - INTERVAL '90 minutes' GROUP BY domain)
+        SELECT DISTINCT ON (f.event_type, f.lead_time_minutes)
+               f.lead_time_minutes, f.severity_level, f.event_type, f.max_dbz, f.estimated_rain_mmh, f.prob,
+               f.run_timestamp, f.domain
+        FROM forecast_polygons f JOIN latest l ON l.domain = f.domain AND l.run = f.run_timestamp
+        WHERE ST_Intersects(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), f.geom)
+        ORDER BY f.event_type, f.lead_time_minutes, (f.domain = 'IT') DESC, f.prob DESC NULLS LAST"""),
+        params)).mappings().all()
+    radar = sorted(radar, key=lambda r: (r["lead_time_minutes"], -{"EXTREME": 3, "SEVERE": 2, "MODERATE": 1}.get(
+        r["severity_level"], 0)))
     cap = (await session.execute(text("""
-        SELECT identifier, event, event_type, severity, headline, area_desc, onset, expires FROM cap_alerts
-        WHERE (expires IS NULL OR expires > NOW())
+        SELECT identifier, event, event_type, severity, headline, area_desc, onset, expires, provider FROM cap_alerts
+        WHERE (expires IS NULL OR expires > NOW()) AND severity IN ('Moderate', 'Severe', 'Extreme')
           AND ST_Intersects(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), geom)"""), params)).mappings().all()
     return {"radar": [dict(r) for r in radar], "cap": [dict(c) for c in cap]}

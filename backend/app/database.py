@@ -15,10 +15,27 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
+def split_sql(sql: str) -> list[str]:
+    """Split a script on ';' outside dollar-quoted ($$ ... $$) blocks; drop comment lines."""
+    lines = [ln for ln in sql.splitlines() if not ln.strip().startswith("--")]
+    out, cur, in_dollar = [], [], False
+    for part in "\n".join(lines).split("$$"):
+        if in_dollar:
+            cur.append("$$" + part + "$$")
+        else:
+            pieces = part.split(";")
+            cur.append(pieces[0])
+            for p in pieces[1:]:
+                out.append("".join(cur))
+                cur = [p]
+        in_dollar = not in_dollar
+    out.append("".join(cur))
+    return [s.strip() for s in out if s.strip()]
+
+
 async def init_db() -> None:
     """Apply the idempotent schema (safe on every start)."""
-    lines = [ln for ln in SCHEMA_PATH.read_text().splitlines() if not ln.strip().startswith("--")]
-    statements = [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
+    statements = split_sql(SCHEMA_PATH.read_text())
     async with engine.begin() as conn:
         # Serialize concurrent initialisers (api + worker starting together)
         await conn.execute(text("SELECT pg_advisory_xact_lock(424242)"))
