@@ -25,7 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Point DNS at VPS (A/AAAA, proxied)
+      - name: Point DNS at VPS (A/AAAA, proxied) - optional
+        continue-on-error: true   # DNS may already be managed elsewhere; never block the deploy
         env: { CF_TOKEN: "${{ secrets.CLOUDFLARE_API_TOKEN }}" }
         run: |
           [ -z "$CF_TOKEN" ] && { echo "::warning::no CLOUDFLARE_API_TOKEN, DNS untouched"; exit 0; }
