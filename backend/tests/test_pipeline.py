@@ -183,3 +183,22 @@ def test_lightning_lfl_parsing():
     lat, lon, secs, rad = fl[0]
     assert abs(lat - 44.52) < 0.01 and abs(lon - 11.43) < 0.01
     assert abs(secs - datetime(2026, 11, 17, 15, 0, tzinfo=timezone.utc).timestamp()) < 1
+
+
+def test_calibration_mapping_monotonic():
+    from worker.probability import BINS, calibrate
+    rel = [[0.0, 0.01, 0.03, 0.05, 0.1, 0.12, 0.2, 0.18, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.85, 0.9]]
+    cal = {"reliability": {"HEAVY_RAIN": rel}}
+    p = np.linspace(0, 1, 50).astype("float32")
+    c = calibrate(p, "HEAVY_RAIN", 0, cal)
+    assert np.all(np.diff(c) >= -1e-6) and c[0] == 0.0 and c[-1] <= 1.0
+    assert abs(float(calibrate(np.array([0.5], dtype="float32"), "HEAVY_RAIN", 0, cal)[0]) - 0.4) < 0.08
+    assert len(BINS) == 21
+
+
+def test_radar_payload_uses_point_intensity_and_probability():
+    from worker.notifier import build_radar_payload
+    row = {"lead_time_minutes": 20, "event_type": "HEAVY_RAIN", "severity_level": "MODERATE", "prob": 0.78,
+           "point_dbz": 30.0, "timezone": "Europe/Rome", "flashes_near": 0}
+    p = build_radar_payload(row, datetime(2026, 11, 17, 15, 50, tzinfo=timezone.utc))
+    assert "Probabilità 80%" in p["body"] and "≥ 6 mm/h" in p["body"] and "17:10" in p["body"]

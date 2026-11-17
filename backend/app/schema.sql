@@ -83,6 +83,32 @@ CREATE INDEX IF NOT EXISTS idx_lightning_geom ON lightning_flashes USING GIST (g
 CREATE INDEX IF NOT EXISTS idx_lightning_time ON lightning_flashes (flash_time);
 ALTER TABLE lightning_flashes ENABLE ROW LEVEL SECURITY;
 
+-- v4: point forecasts at subscriber locations + verification
+CREATE TABLE IF NOT EXISTS point_forecasts (
+    run_timestamp TIMESTAMPTZ NOT NULL,
+    subscription_id UUID NOT NULL REFERENCES user_subscriptions(id) ON DELETE CASCADE,
+    event_type VARCHAR(20) NOT NULL,
+    lead_time_minutes INT NOT NULL,
+    prob REAL NOT NULL,
+    dbz REAL NULL,
+    PRIMARY KEY (run_timestamp, subscription_id, event_type, lead_time_minutes)
+);
+CREATE TABLE IF NOT EXISTS point_obs (
+    run_timestamp TIMESTAMPTZ NOT NULL,
+    subscription_id UUID NOT NULL REFERENCES user_subscriptions(id) ON DELETE CASCADE,
+    dbz REAL NULL,          -- max observed reflectivity within ~3 km (NULL = outside coverage)
+    snow BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (run_timestamp, subscription_id)
+);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS eta TIMESTAMPTZ NULL;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS prob REAL NULL;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS verified BOOLEAN NULL;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ NULL;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS observed_dbz REAL NULL;
+ALTER TABLE point_forecasts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE forecast_polygons ADD COLUMN IF NOT EXISTS prob REAL NULL;
+ALTER TABLE point_obs ENABLE ROW LEVEL SECURITY;
+
 -- Supabase exposes the public schema through its Data API: RLS with no policies blocks anon/authenticated
 -- roles entirely (the backend connects as table owner and is unaffected). Harmless on plain Postgres.
 ALTER TABLE user_subscriptions ENABLE ROW LEVEL SECURITY;

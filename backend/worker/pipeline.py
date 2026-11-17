@@ -15,15 +15,17 @@ from . import cap, notifier
 from .ingest_dpc import fetch_latest_frames
 from .nowcast_engine import run_nowcast
 from .storage import Storage
-from .vectorizer import publish, vectorize
+from . import points
+from .probability import event_probabilities
+from .vectorizer import publish, vectorize_probabilistic
 
 log = logging.getLogger("pipeline")
 settings = get_settings()
 
 INSERT_POLY = text("""
 INSERT INTO forecast_polygons (run_timestamp, lead_time_minutes, severity_level, event_type, max_dbz,
-                               estimated_rain_mmh, geom)
-VALUES (:run, :lead, :sev, :ev, :max_dbz, :rain, ST_Multi(ST_GeomFromText(:wkt, 4326)))
+                               estimated_rain_mmh, prob, geom)
+VALUES (:run, :lead, :sev, :ev, :max_dbz, :rain, :prob, ST_Multi(ST_GeomFromText(:wkt, 4326)))
 """)
 
 
@@ -35,13 +37,14 @@ async def run_cycle(redis, storage: Storage) -> datetime | None:
         log.info("Run %s already processed", run_time)
         return run_time
     result = await asyncio.to_thread(run_nowcast, frames)
-    polys = await asyncio.to_thread(vectorize, result)
+    probs = await asyncio.to_thread(event_probabilities, result)
+    polys = await asyncio.to_thread(vectorize_probabilistic, result, probs)
 
     async with SessionLocal() as session:
         await session.execute(text("DELETE FROM forecast_polygons WHERE run_timestamp = :r"), {"r": run_time})
         if polys:
             await session.execute(INSERT_POLY, [{
-                "run": run_time, "lead": p.lead_time_minutes, "sev": p.severity_level, "ev": p.event_type,
+                "run": run_time, "lead": p.lead_time_minutes, "sev": p.severity_level, "ev": p.event_type, "prob": p.prob,
                 "max_dbz": p.max_dbz, "rain": p.estimated_rain_mmh, "wkt": p.geom.wkt,
             } for p in polys])
         await session.execute(text("DELETE FROM forecast_polygons WHERE run_timestamp < :c"),
@@ -52,6 +55,8 @@ async def run_cycle(redis, storage: Storage) -> datetime | None:
     await asyncio.to_thread(publish, result, polys, storage, cap_geo)
 
     async with SessionLocal() as session:
+        await points.store_point_data(session, result, probs)
+        await points.verify_alerts(session, run_time)
         sent = await notifier.notify_radar(session, redis, run_time)
         duration = time.perf_counter() - t0
         await session.execute(text("""

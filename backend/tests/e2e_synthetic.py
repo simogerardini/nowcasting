@@ -12,7 +12,11 @@ from app.config import get_settings
 from app.database import SessionLocal, init_db
 from app.kv import get_kv
 from tests.test_pipeline import synthetic_frames
-from worker import notifier, pipeline
+from worker import notifier, pipeline, probability
+
+# tests must not depend on the calibration produced by the latest backtest
+probability.CALIBRATION_FILE = probability.CALIBRATION_FILE.with_name("__none__.json")
+probability.load_calibration.cache_clear()
 from worker.storage import Storage
 
 settings = get_settings()
@@ -60,25 +64,27 @@ async def main():
     async with SessionLocal() as s:
         await s.execute(text("""INSERT INTO user_subscriptions (endpoint,p256dh,auth,location,alert_types)
             VALUES ('https://push.example/onset-fc','pkey-xxxxxxxxxxxx','auth-xxxx',
-                    ST_SetSRID(ST_MakePoint(10.75,44.5),4326),'{RAIN_START}')"""))
+                    ST_SetSRID(ST_MakePoint(10.75,44.5),4326),'{RAIN_START}'),
+                   ('https://push.example/onset-obs','pkey-xxxxxxxxxxxx','auth-xxxx',
+                    ST_SetSRID(ST_MakePoint(10.47,44.5),4326),'{RAIN_START}')"""))
         await s.commit()
     sent_to.clear()
     pipeline.fetch_latest_frames = lambda: run1
     await pipeline.run_cycle(r, Storage())
     fc_titles = [t for e, t in sent_to if e.endswith("onset-fc")]
-    async with SessionLocal() as s:  # user B subscribes after run 1
-        await s.execute(text("""INSERT INTO user_subscriptions (endpoint,p256dh,auth,location,alert_types)
-            VALUES ('https://push.example/onset-obs','pkey-xxxxxxxxxxxx','auth-xxxx',
-                    ST_SetSRID(ST_MakePoint(10.47,44.5),4326),'{RAIN_START}')"""))
-        await s.commit()
     sent_to.clear()
     pipeline.fetch_latest_frames = lambda: run2
     await r.delete("nowcast:last_run")
     await pipeline.run_cycle(r, Storage())
-    obs_titles = [t for e, t in sent_to if e.endswith("onset-obs")]
-    print("onset forecast:", fc_titles, "| onset observed:", obs_titles)
-    assert fc_titles and "arrivo" in fc_titles[0]
-    assert obs_titles and "Inizia a piovere" in obs_titles[0]
+    print("onset forecast (run1):", fc_titles, "| run2:", [t for e, t in sent_to])
+    async with SessionLocal() as s:
+        per_user = dict((await s.execute(text("""SELECT u.endpoint, count(*) FROM alert_history ah
+            JOIN user_subscriptions u ON u.id = ah.subscription_id
+            WHERE u.endpoint LIKE 'https://push.example/onset-%' GROUP BY 1"""))).all())
+        ver = (await s.execute(text("SELECT count(*) FROM alert_history WHERE eta IS NOT NULL AND prob IS NOT NULL"))).scalar()
+    print("rain-onset alerts per user over both runs:", per_user, "| alerts with ETA+prob:", ver)
+    # each user warned exactly once (forecast or observed onset), never twice
+    assert per_user.get("https://push.example/onset-fc") == 1 and per_user.get("https://push.example/onset-obs") == 1
 
     async with SessionLocal() as s:
         await s.execute(text("DELETE FROM user_subscriptions WHERE endpoint LIKE 'https://push.example/%'"))

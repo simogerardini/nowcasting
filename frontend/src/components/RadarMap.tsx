@@ -154,7 +154,7 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
           .setHTML(
             `<b>${EVENT_BY_ID[p.event_type as string]?.label ?? p.event_type}</b><br/>` +
               `+${p.lead_time_minutes} min (${fmtTime(p.valid_time as string)})<br/>` +
-              `max ${p.max_dbz} dBZ · ~${p.estimated_rain_mmh} mm/h`,
+              (p.prob != null && p.prob !== "" ? `probabilità fino a ${Math.round(Number(p.prob) * 100)}%` : `max ${p.max_dbz} dBZ`),
           )
           .addTo(m);
       });

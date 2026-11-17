@@ -114,6 +114,14 @@ async def vapid_public_key():
     return {"publicKey": settings.vapid_public_key}
 
 
+@app.get("/api/v1/verification")
+async def verification(days: int = 30, session: AsyncSession = Depends(get_session)):
+    """Real-world reliability: radar alerts verified against later radar observations at the user's point,
+    and reliability of point probabilities (forecast probability vs observed frequency)."""
+    from worker.points import verification_stats
+    return await verification_stats(session, max(1, min(days, 90)))
+
+
 @app.get("/api/v1/event-types")
 async def event_types():
     return {
@@ -221,7 +229,7 @@ async def alerts_at_point(lat: float, lon: float, session: AsyncSession = Depend
         raise HTTPException(422, "invalid coordinates")
     params = {"lat": lat, "lon": lon}
     radar = (await session.execute(text("""
-        SELECT f.lead_time_minutes, f.severity_level, f.event_type, f.max_dbz, f.estimated_rain_mmh, f.run_timestamp
+        SELECT f.lead_time_minutes, f.severity_level, f.event_type, f.max_dbz, f.estimated_rain_mmh, f.prob, f.run_timestamp
         FROM forecast_polygons f
         WHERE f.run_timestamp = (SELECT max(run_timestamp) FROM forecast_polygons)
           AND ST_Intersects(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), f.geom)

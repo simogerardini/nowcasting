@@ -11,7 +11,7 @@ import { Coords, registerServiceWorker, storedEndpoint, watchLocation } from "@/
 const RadarMap = dynamic(() => import("@/components/RadarMap"), { ssr: false });
 
 interface PointAlerts {
-  radar: { lead_time_minutes: number; severity_level: string; event_type: string; max_dbz: number; estimated_rain_mmh: number }[];
+  radar: { lead_time_minutes: number; severity_level: string; event_type: string; max_dbz: number; estimated_rain_mmh: number; prob: number | null }[];
   cap: { identifier: string; event: string; event_type: string | null; severity: string; headline: string | null }[];
 }
 
@@ -71,7 +71,7 @@ export default function Home() {
             <p>
               <span className="mr-1 inline-block h-2 w-2 rounded-full" style={{ background: EVENT_BY_ID[next.event_type]?.color }} />
               <b>{EVENT_BY_ID[next.event_type]?.label ?? next.event_type}</b> sulla tua posizione tra ~{next.lead_time_minutes} min
-              <br />~{Math.round(next.estimated_rain_mmh)} mm/h · {Math.round(next.max_dbz)} dBZ
+              {next.prob != null && <> · probabilità {Math.round(next.prob * 100)}%</>}
             </p>
           ) : (
             !nowWet && <p className="text-emerald-300">✓ Nessuna precipitazione prevista nei prossimi 60 min</p>

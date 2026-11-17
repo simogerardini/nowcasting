@@ -45,6 +45,7 @@ class RiskPolygon:
     estimated_rain_mmh: float
     geom: MultiPolygon  # EPSG:4326
     event_type: str = "HEAVY_RAIN"
+    prob: float | None = None  # max calibrated probability inside the area
 
 
 def _xform(src: CRS, dst: CRS):
@@ -132,6 +133,40 @@ def vectorize_field(dbz: np.ndarray, transform, crs, lead_min: int, snow: np.nda
     return out
 
 
+def vectorize_probabilistic(result: NowcastResult, probs: dict[str, np.ndarray]) -> list[RiskPolygon]:
+    """Risk areas = where the CALIBRATED probability reaches the event's alert threshold (same rule as
+    push alerts, no arbitrary buffer). Lead 0 = observed rain/snow now."""
+    from .probability import alert_threshold
+
+    polys: list[RiskPolygon] = []
+    if result.observed_dbz is not None:
+        obs_snow = result.observed[-1].snow if result.observed else None
+        f0 = np.where(np.isfinite(result.observed_dbz), result.observed_dbz, -np.inf)
+        is_snow = (obs_snow > 0.5) if obs_snow is not None else np.zeros(f0.shape, dtype=bool)
+        for ev, mask in (("RAIN_START", (f0 >= 15) & ~is_snow), ("SNOW", (f0 >= 15) & is_snow)):
+            if mask.any():
+                spec = RADAR_EVENTS[ev]
+                for g, mx, p90 in _components(mask, f0, result.transform, result.crs, 0.0):
+                    polys.append(RiskPolygon(0, spec["severity"], spec["dbz"], round(mx, 1),
+                                             round(float(dbz_to_rain(np.array(p90))), 1), g, ev, 1.0))
+    for ev, p in probs.items():
+        spec = RADAR_EVENTS[ev]
+        thr = alert_threshold(ev)
+        for i, lead in enumerate(result.lead_minutes):
+            if lead > spec["max_lead"]:
+                break
+            mask = p[i] >= thr
+            if not mask.any():
+                continue
+            field = np.where(np.isfinite(result.forecast_dbz[i]), result.forecast_dbz[i], -np.inf)
+            for g, mx, p90 in _components(mask, field, result.transform, result.crs, 0.0):
+                polys.append(RiskPolygon(lead, spec["severity"], spec["dbz"], round(max(mx, 0.0), 1),
+                                         round(float(dbz_to_rain(np.array(max(p90, spec["dbz"])))), 1), g, ev,
+                                         round(float(p[i][mask].max()), 2)))
+    log.info("Vectorized %d probabilistic risk areas", len(polys))
+    return polys
+
+
 def vectorize(result: NowcastResult) -> list[RiskPolygon]:
     polys: list[RiskPolygon] = []
     # lead 0 = observed now: only used to know where it is ALREADY raining/snowing (onset alerts)
@@ -158,6 +193,7 @@ def to_geojson(result: NowcastResult, polys: list[RiskPolygon]) -> dict:
                 "valid_time": (result.run_time + timedelta(minutes=p.lead_time_minutes)).isoformat(),
                 "severity_level": p.severity_level,
                 "event_type": p.event_type,
+                "prob": p.prob,
                 "threshold_dbz": p.threshold_dbz,
                 "max_dbz": p.max_dbz,
                 "estimated_rain_mmh": p.estimated_rain_mmh,

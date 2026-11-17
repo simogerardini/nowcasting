@@ -30,6 +30,8 @@ class NowcastResult:
     crs: object
     source: str
     elapsed_s: float
+    velocity: np.ndarray | None = None  # (2, H, W) LK motion field, pixels per INPUT interval
+    steps: object = None                # pySTEPS timesteps (int or fractional list) used for leads
     snow_fc: np.ndarray | None = None  # (T, H, W) advected snow fraction 0..1 (None = unknown)
     poh_fc: np.ndarray | None = None   # (T, H, W) advected probability of hail 0..1 (DPC POH)
     observed_dbz: np.ndarray | None = None  # last observed frame, filtered (for "already raining" checks)
@@ -96,6 +98,7 @@ def run_nowcast(frames: list[RadarFrame]) -> NowcastResult:
     wet_frac = float((stack[-1] > DB_ZERO).mean())
     snow_fc = None
     poh_fc = None
+    velocity = None
     if wet_frac < 1e-5:
         log.info("No significant echoes - empty forecast")
         fc = np.full((n,) + stack.shape[1:], -np.inf, dtype="float32")
@@ -133,7 +136,7 @@ def run_nowcast(frames: list[RadarFrame]) -> NowcastResult:
     return NowcastResult(
         run_time=frames[-1].time, observed=filtered, forecast_dbz=fc, lead_minutes=lead,
         transform=frames[-1].transform, crs=frames[-1].crs, source=frames[-1].source, elapsed_s=elapsed,
-        snow_fc=snow_fc, poh_fc=poh_fc, observed_dbz=filtered[-1].dbz,
+        snow_fc=snow_fc, poh_fc=poh_fc, observed_dbz=filtered[-1].dbz, velocity=velocity, steps=steps,
     )
 
 

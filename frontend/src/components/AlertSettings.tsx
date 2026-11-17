@@ -14,7 +14,8 @@ import {
   updatePrefs,
   DEFAULT_PREFS,
 } from "@/lib/pushManager";
-import { CAP_EVENTS, EventSpec, LIGHTNING_EVENTS, RADAR_EVENTS } from "@/lib/events";
+import { API_URL } from "@/lib/config";
+import { CAP_EVENTS, EVENT_BY_ID, EventSpec, LIGHTNING_EVENTS, RADAR_EVENTS } from "@/lib/events";
 
 function Checks({
   items, selected, onToggle, cols = 1,
@@ -37,6 +38,42 @@ function Checks({
         </label>
       ))}
     </div>
+  );
+}
+
+interface VerifRow { event_type: string; alerts: number; hits: number; false_alarms: number; precision: number | null }
+
+function Reliability() {
+  const [rows, setRows] = useState<VerifRow[] | null>(null);
+  useEffect(() => {
+    fetch(`${API_URL}/api/v1/verification?days=30`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setRows(d?.alerts ?? []))
+      .catch(() => setRows([]));
+  }, []);
+  if (!rows) return null;
+  return (
+    <fieldset>
+      <legend className="mb-1 font-semibold">Affidabilità reale · ultimi 30 giorni</legend>
+      {rows.length === 0 ? (
+        <p className="text-xs text-slate-400">Ancora nessun avviso radar verificato.</p>
+      ) : (
+        <table className="w-full text-xs">
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.event_type}>
+                <td className="py-0.5">{EVENT_BY_ID[r.event_type]?.label ?? r.event_type}</td>
+                <td className="text-right text-slate-300">
+                  {r.precision != null ? `${Math.round(r.precision * 100)}% confermati` : "in verifica"}
+                </td>
+                <td className="pl-2 text-right text-slate-500">({r.hits}/{r.hits + r.false_alarms})</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p className="mt-1 text-xs text-slate-500">Ogni avviso viene confrontato con il radar osservato sulla tua posizione.</p>
+    </fieldset>
   );
 }
 
@@ -177,6 +214,8 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
             )}
             <p className="text-xs text-slate-400">Di notte vengono silenziati inizio pioggia, pioggia forte, neve e allerte gialle; temporali forti, grandine e allerte arancioni/rosse arrivano sempre.</p>
           </fieldset>
+
+          <Reliability />
 
           {msg && <p className="text-xs text-sky-200">{msg}</p>}
         </div>

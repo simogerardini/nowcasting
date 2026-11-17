@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import numpy as np
 from pywebpush import WebPushException, webpush
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,60 +16,70 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.events import CAP_EVENTS, LIGHTNING_EVENTS, RADAR_EVENTS, SEVERITY_RANK, sql_rank
 
+from .nowcast_engine import dbz_to_rain
+
 log = logging.getLogger("notifier")
 settings = get_settings()
 
 CAP_SEVERITY_LEVEL = {"Minor": "MODERATE", "Moderate": "MODERATE", "Severe": "SEVERE", "Extreme": "EXTREME"}
 RANK = sql_rank("f.severity_level")
 
-# Spec §5 query, generalised to user-selected event types:
-# - one notification per user per run: most severe event first, then most imminent
-# - dedup: same event within its window (RAIN_START / SNOW 120 min, others 45 min), and within 45 min
-#   anything not more severe than what was already sent (only upgrades get through)
-# - onset events (RAIN_START, SNOW): forecast only if dry now; or observed now after a dry previous run
-MATCH_SQL = text(f"""
+def _thresholds_sql() -> str:
+    """VALUES table of per-event alert rules (calibrated probability threshold, max lead, severity)."""
+    from .probability import alert_threshold
+    rows = []
+    for ev, spec in RADAR_EVENTS.items():
+        rank = SEVERITY_RANK[spec["severity"]]
+        rows.append(f"('{ev}', {alert_threshold(ev):.3f}, {int(spec['max_lead'])}, {rank}, '{spec['severity']}', "
+                    f"{int(spec['dedup_min'])})")
+    return "(VALUES " + ", ".join(rows) + ") AS t(event_type, p, max_lead, rnk, severity, dedup_min)"
+
+
+def match_sql():
+    """Point-based, probabilistic matching (replaces polygon intersection):
+    - forecast alert: calibrated P(event at the user's pixel) >= event threshold at some lead <= max lead
+    - rain/snow onset: forecast only if dry at the user now; observed onset if wet now and dry in the previous run
+    - one notification per user per run (most severe, then most imminent, then most probable)
+    - dedup: same event within its window, and never an equal/less severe radar alert within 45 min."""
+    return text(f"""
+WITH t AS (SELECT * FROM {_thresholds_sql()}),
+cur AS (SELECT * FROM point_obs WHERE run_timestamp = :current_run),
+prev AS (SELECT * FROM point_obs WHERE run_timestamp =
+          (SELECT max(run_timestamp) FROM point_obs WHERE run_timestamp < :current_run)),
+cand AS (
+    SELECT pf.subscription_id, pf.event_type, pf.lead_time_minutes, pf.prob, pf.dbz
+    FROM point_forecasts pf JOIN t ON t.event_type = pf.event_type
+    WHERE pf.run_timestamp = :current_run AND pf.lead_time_minutes BETWEEN 5 AND t.max_lead AND pf.prob >= t.p
+    UNION ALL
+    SELECT c.subscription_id, CASE WHEN c.snow THEN 'SNOW' ELSE 'RAIN_START' END, 0, 1.0, c.dbz
+    FROM cur c JOIN prev p ON p.subscription_id = c.subscription_id
+    WHERE c.dbz >= 15 AND COALESCE(p.dbz, -99) < 15
+)
 SELECT DISTINCT ON (u.id)
-    u.id AS user_id, u.endpoint, u.p256dh, u.auth,
-    u.quiet_hours_start, u.quiet_hours_end, u.timezone,
-    f.lead_time_minutes, f.severity_level, f.event_type, f.estimated_rain_mmh, f.max_dbz,
+    u.id AS user_id, u.endpoint, u.p256dh, u.auth, u.quiet_hours_start, u.quiet_hours_end, u.timezone,
+    cand.lead_time_minutes, cand.event_type, cand.prob, cand.dbz AS point_dbz, t.severity AS severity_level,
     (SELECT count(*) FROM lightning_flashes l
       WHERE l.flash_time > NOW() - INTERVAL '15 minutes'
         AND ST_DWithin(l.geom, u.location, 0.4)
         AND ST_DWithin(l.geom::geography, u.location::geography, 30000)) AS flashes_near
-FROM user_subscriptions u
-JOIN forecast_polygons f ON ST_Intersects(u.location, f.geom)
-WHERE f.run_timestamp = :current_run
-  AND f.event_type = ANY(u.alert_types)
-  AND (
-    -- forecast: rain/snow arriving at a place that is dry now (onset) or any intense event
-    (f.lead_time_minutes > 0
-     AND (f.event_type NOT IN ('RAIN_START', 'SNOW') OR NOT EXISTS (
-            SELECT 1 FROM forecast_polygons o
-            WHERE o.run_timestamp = :current_run AND o.lead_time_minutes = 0
-              AND o.event_type = f.event_type AND ST_Intersects(u.location, o.geom))))
-    -- observed onset: raining/snowing now, dry in the previous radar run (covers data latency)
-    OR (f.lead_time_minutes = 0 AND f.event_type IN ('RAIN_START', 'SNOW') AND NOT EXISTS (
-            SELECT 1 FROM forecast_polygons o
-            WHERE o.run_timestamp = (SELECT max(run_timestamp) FROM forecast_polygons
-                                     WHERE run_timestamp < :current_run)
-              AND o.lead_time_minutes = 0
-              AND o.event_type = f.event_type AND ST_Intersects(u.location, o.geom)))
-  )
+FROM cand
+JOIN user_subscriptions u ON u.id = cand.subscription_id
+JOIN t ON t.event_type = cand.event_type
+LEFT JOIN cur ON cur.subscription_id = u.id
+WHERE cand.event_type = ANY(u.alert_types)
+  AND (cand.event_type NOT IN ('RAIN_START', 'SNOW') OR cand.lead_time_minutes = 0 OR COALESCE(cur.dbz, -99) < 15)
   AND NOT EXISTS (
       SELECT 1 FROM alert_history ah
       WHERE ah.subscription_id = u.id AND ah.source = 'RADAR'
         AND (
-          -- same event recently (onset events: longer window)
-          (ah.event_type = f.event_type
-           AND ah.sent_at > NOW() - make_interval(mins => CASE WHEN f.event_type IN ('RAIN_START', 'SNOW')
-                                                   THEN CAST(:dedup_onset AS INT) ELSE CAST(:dedup AS INT) END))
-          -- or an equal/more severe alert recently: only upgrades get through
+          (ah.event_type = cand.event_type AND ah.sent_at > NOW() - make_interval(mins => t.dedup_min))
           OR (ah.sent_at > NOW() - make_interval(mins => CAST(:dedup AS INT))
-              AND {sql_rank("ah.severity_level")} >= {RANK})
+              AND {sql_rank("ah.severity_level")} >= t.rnk)
         )
   )
-ORDER BY u.id, {RANK} DESC, f.lead_time_minutes ASC, f.max_dbz DESC
+ORDER BY u.id, t.rnk DESC, cand.lead_time_minutes ASC, cand.prob DESC
 """)
+
 
 CAP_MATCH_SQL = text("""
 SELECT u.id AS user_id, u.endpoint, u.p256dh, u.auth,
@@ -95,6 +106,8 @@ class Notification:
     source: str = "RADAR"
     ref: str | None = None
     event_type: str | None = None
+    eta: datetime | None = None
+    prob: float | None = None
 
 
 # ------------------------------------------------------------------ rules
@@ -118,33 +131,35 @@ def build_radar_payload(row, run_time: datetime) -> dict:
     ev = row["event_type"]
     spec = RADAR_EVENTS[ev]
     sev = row["severity_level"]
-    eta = (run_time + timedelta(minutes=lead)).astimezone(ZoneInfo(row["timezone"] or "Europe/Rome"))
-    rain = row["estimated_rain_mmh"]
+    data = {"url": f"{settings.frontend_url}/?focus=alert", "severity": sev, "event": ev, "lead": lead}
     if lead == 0:
         title = {"RAIN_START": "🌧️ Inizia a piovere", "SNOW": "❄️ Inizia a nevicare"}.get(ev, spec["title"])
         body = {"RAIN_START": "Il radar rileva pioggia sulla tua posizione adesso.",
                 "SNOW": "Il radar rileva neve sulla tua posizione adesso."}.get(ev, "") + " Tocca per aprire il radar."
-        return {
-            "title": title, "body": body, "icon": "/icons/storm-alert.png", "badge": "/icons/badge.png",
-            "tag": f"nowcast-{ev}", "renotify": False,
-            "data": {"url": f"{settings.frontend_url}/?focus=alert", "severity": sev, "event": ev, "lead": 0},
-        }
-    title = f"{spec['title']} tra ~{lead} min"
-    body = {
-        "RAIN_START": f"Inizio pioggia previsto sulla tua posizione verso le {eta:%H:%M}.",
-        "HEAVY_RAIN": f"Pioggia forte (~{rain:.0f} mm/h) sulla tua posizione verso le {eta:%H:%M}.",
-        "CLOUDBURST": f"Nubifragio / temporale forte (~{rain:.0f} mm/h) sulla tua posizione verso le {eta:%H:%M}.",
-        "HAIL": f"Cella molto intensa ({row['max_dbz']:.0f} dBZ): possibile grandine e raffiche verso le {eta:%H:%M}.",
-        "SNOW": f"Neve in arrivo sulla tua posizione verso le {eta:%H:%M}.",
+        return {"title": title, "body": body, "icon": "/icons/storm-alert.png", "badge": "/icons/badge.png",
+                "tag": f"nowcast-{ev}", "renotify": False, "data": data}
+    eta = (run_time + timedelta(minutes=lead)).astimezone(ZoneInfo(row["timezone"] or "Europe/Rome"))
+    pct = int(round(100 * float(row["prob"]) / 5.0) * 5)
+    # intensity: forecast at the user's pixel, never below the event threshold the alert is about
+    dbz = max(float(row["point_dbz"] if row["point_dbz"] is not None else spec["dbz"]), spec["dbz"])
+    rate = float(dbz_to_rain(np.array(dbz)))
+    thr_rate = float(dbz_to_rain(np.array(spec["dbz"])))
+    what = {
+        "RAIN_START": "Inizio pioggia",
+        "HEAVY_RAIN": f"Pioggia forte (≥ {thr_rate:.0f} mm/h, stimati ~{rate:.0f} mm/h)",
+        "CLOUDBURST": f"Nubifragio / temporale forte (≥ {thr_rate:.0f} mm/h, stimati ~{rate:.0f} mm/h)",
+        "HAIL": "Cella molto intensa: possibile grandine e raffiche",
+        "SNOW": "Inizio nevicata",
     }[ev]
+    body = f"{what} sulla tua posizione verso le {eta:%H:%M}. Probabilità {pct}%."
     if row.get("flashes_near") and ev in ("HEAVY_RAIN", "CLOUDBURST", "HAIL"):
         body += f" ⚡ Attività elettrica in zona ({row['flashes_near']} fulmini entro 30 km)."
     body += " Tocca per aprire il radar."
+    data["prob"] = round(float(row["prob"]), 3)
     return {
-        "title": title, "body": body, "icon": "/icons/storm-alert.png", "badge": "/icons/badge.png",
-        "tag": f"nowcast-{ev}", "renotify": SEVERITY_RANK[sev] >= 2,
-        "requireInteraction": sev == "EXTREME",
-        "data": {"url": f"{settings.frontend_url}/?focus=alert", "severity": sev, "event": ev, "lead": lead},
+        "title": f"{spec['title']} tra ~{lead} min", "body": body, "icon": "/icons/storm-alert.png",
+        "badge": "/icons/badge.png", "tag": f"nowcast-{ev}", "renotify": SEVERITY_RANK[sev] >= 2,
+        "requireInteraction": sev == "EXTREME", "data": data,
     }
 
 
@@ -204,9 +219,10 @@ async def deliver(session: AsyncSession, redis, batch: list[Notification]) -> in
         if status in (200, 201, 202):
             sent += 1
             await session.execute(text(
-                "INSERT INTO alert_history (subscription_id, severity_level, source, ref, event_type) "
-                "VALUES (:u, :s, :src, :r, :e)"),
-                {"u": n.user_id, "s": n.severity, "src": n.source, "r": n.ref, "e": n.event_type})
+                "INSERT INTO alert_history (subscription_id, severity_level, source, ref, event_type, eta, prob) "
+                "VALUES (:u, :s, :src, :r, :e, :eta, :p)"),
+                {"u": n.user_id, "s": n.severity, "src": n.source, "r": n.ref, "e": n.event_type,
+                 "eta": n.eta, "p": n.prob})
         else:
             await redis.delete(key)
             if status in (404, 410):
@@ -223,15 +239,18 @@ async def deliver(session: AsyncSession, redis, batch: list[Notification]) -> in
 
 
 async def notify_radar(session: AsyncSession, redis, run_time: datetime) -> int:
-    rows = (await session.execute(MATCH_SQL, {"current_run": run_time, "dedup": settings.dedup_minutes,
-                                              "dedup_onset": RADAR_EVENTS["RAIN_START"]["dedup_min"]})).mappings().all()
+    rows = (await session.execute(match_sql(), {"current_run": run_time,
+                                                "dedup": settings.dedup_minutes})).mappings().all()
     batch = []
     for r in rows:
         quiet = in_quiet_hours(r["quiet_hours_start"], r["quiet_hours_end"], r["timezone"])
         if not should_send(r["severity_level"], quiet):
             continue
-        batch.append(Notification(r["user_id"], r["endpoint"], r["p256dh"], r["auth"], r["severity_level"],
-                                  build_radar_payload(r, run_time), event_type=r["event_type"]))
+        n = Notification(r["user_id"], r["endpoint"], r["p256dh"], r["auth"], r["severity_level"],
+                         build_radar_payload(r, run_time), event_type=r["event_type"])
+        n.eta = run_time + timedelta(minutes=int(r["lead_time_minutes"]))
+        n.prob = float(r["prob"])
+        batch.append(n)
     sent = await deliver(session, redis, batch) if batch else 0
     log.info("Radar alerts: %d matched, %d queued, %d sent", len(rows), len(batch), sent)
     return sent
