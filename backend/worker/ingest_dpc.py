@@ -1,0 +1,202 @@
+"""Radar ingestion: DPC (Protezione Civile) national mosaic, RainViewer fallback, CAP alerts."""
+from __future__ import annotations
+
+import io
+import logging
+import math
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import httpx
+import numpy as np
+import rasterio
+from PIL import Image
+from rasterio.crs import CRS
+from rasterio.transform import Affine, from_bounds
+
+from app.config import get_settings
+
+log = logging.getLogger("ingest")
+settings = get_settings()
+
+UA = {"User-Agent": "noctalix-nowcast/1.0 (+https://nowcast.noctalix.com)"}
+
+
+@dataclass
+class RadarFrame:
+    time: datetime              # UTC, nominal scan time
+    dbz: np.ndarray             # float32 (H, W), NaN = no data / outside coverage
+    transform: Affine
+    crs: CRS
+    source: str
+
+
+class IngestError(RuntimeError):
+    pass
+
+
+# ------------------------------------------------------------------ helpers
+def _floor5(t: datetime) -> datetime:
+    return t.replace(minute=t.minute - t.minute % 5, second=0, microsecond=0)
+
+
+def _read_geotiff(content: bytes, t: datetime, source: str) -> RadarFrame:
+    with rasterio.MemoryFile(content) as mem, mem.open() as ds:
+        arr = ds.read(1).astype("float32")
+        nodata = ds.nodata
+        if nodata is not None:
+            arr[arr == nodata] = np.nan
+        arr[(arr < -100) | (arr > 100)] = np.nan  # DPC uses -9999 / large sentinels
+        crs = ds.crs or CRS.from_epsg(4326)
+        return RadarFrame(t, arr, ds.transform, crs, source)
+
+
+# ------------------------------------------------------------------ DPC
+class DPCClient:
+    """Client for the DPC Radar open API (https://radar.protezionecivile.it)."""
+
+    def __init__(self, client: httpx.Client, product: str | None = None):
+        self.c = client
+        self.base = settings.dpc_api_base.rstrip("/")
+        self.product = product or settings.radar_product
+        self.cache = Path(settings.radar_cache_dir)
+        self.cache.mkdir(parents=True, exist_ok=True)
+
+    def latest_time(self) -> datetime:
+        r = self.c.get(f"{self.base}/wide/product/findLastProductByType", params={"type": self.product})
+        r.raise_for_status()
+        items = r.json().get("lastProducts") or []
+        if not items:
+            raise IngestError("DPC: no lastProducts")
+        return datetime.fromtimestamp(int(items[0]["time"]) / 1000, tz=timezone.utc)
+
+    def _download(self, t: datetime) -> bytes:
+        ms = int(t.timestamp() * 1000)
+        r = self.c.post(f"{self.base}/wide/product/downloadProduct",
+                        json={"productType": self.product, "productDate": ms})
+        r.raise_for_status()
+        if r.headers.get("content-type", "").startswith("application/json"):
+            url = r.json().get("url")
+            if not url:
+                raise IngestError(f"DPC: no url for {t}")
+            r = self.c.get(url)
+            r.raise_for_status()
+        return r.content
+
+    def frame(self, t: datetime) -> RadarFrame:
+        path = self.cache / f"{self.product}_{t:%Y%m%d%H%M}.tif"
+        if path.exists():
+            content = path.read_bytes()
+        else:
+            content = self._download(t)
+            path.write_bytes(content)
+        return _read_geotiff(content, t, "DPC")
+
+    def last_frames(self, n: int) -> list[RadarFrame]:
+        latest = self.latest_time()
+        frames: list[RadarFrame] = []
+        for i in range(n - 1, -1, -1):
+            t = latest - timedelta(minutes=settings.timestep_min * i)
+            frames.append(self.frame(t))
+        self._prune_cache(latest)
+        return frames
+
+    def _prune_cache(self, latest: datetime) -> None:
+        cutoff = latest - timedelta(hours=3)
+        for p in self.cache.glob(f"{self.product}_*.tif"):
+            try:
+                ts = datetime.strptime(p.stem.split("_")[1], "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    p.unlink()
+            except (ValueError, IndexError):
+                continue
+
+
+# ------------------------------------------------------------------ RainViewer (fallback)
+ITALY_BBOX = (6.0, 35.5, 19.0, 47.5)  # lon_min, lat_min, lon_max, lat_max
+RV_ZOOM = 7
+WEB_MERC = CRS.from_epsg(3857)
+R_EARTH = 6378137.0
+
+
+def _tile_xy(lon: float, lat: float, z: int) -> tuple[int, int]:
+    n = 2 ** z
+    x = int((lon + 180) / 360 * n)
+    y = int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n)
+    return x, y
+
+
+def _tile_bounds_merc(x: int, y: int, z: int) -> tuple[float, float, float, float]:
+    size = 2 * math.pi * R_EARTH / 2 ** z
+    left = -math.pi * R_EARTH + x * size
+    top = math.pi * R_EARTH - y * size
+    return left, top - size, left + size, top
+
+
+class RainViewerClient:
+    """Composite from RainViewer tiles, colour scheme 0 = raw dBZ (value & 127) - 32."""
+
+    def __init__(self, client: httpx.Client, bbox=ITALY_BBOX, zoom=RV_ZOOM):
+        self.c, self.bbox, self.z = client, bbox, zoom
+
+    def last_frames(self, n: int) -> list[RadarFrame]:
+        meta = self.c.get(settings.rainviewer_api)
+        meta.raise_for_status()
+        m = meta.json()
+        past = m["radar"]["past"][-n:]
+        if len(past) < n:
+            raise IngestError("RainViewer: not enough frames")
+        return [self._frame(m["host"], p) for p in past]
+
+    def _frame(self, host: str, p: dict) -> RadarFrame:
+        x0, y0 = _tile_xy(self.bbox[0], self.bbox[3], self.z)
+        x1, y1 = _tile_xy(self.bbox[2], self.bbox[1], self.z)
+        nx, ny = x1 - x0 + 1, y1 - y0 + 1
+        out = np.full((ny * 256, nx * 256), np.nan, dtype="float32")
+        for ty in range(y0, y1 + 1):
+            for tx in range(x0, x1 + 1):
+                r = self.c.get(f"{host}{p['path']}/256/{self.z}/{tx}/{ty}/0/0_0.png")
+                if r.status_code != 200:
+                    continue
+                img = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGBA"))
+                val = (img[..., 0].astype("int16") & 127) - 32
+                tile = np.where(img[..., 3] > 0, val, np.nan).astype("float32")
+                oy, ox = (ty - y0) * 256, (tx - x0) * 256
+                out[oy:oy + 256, ox:ox + 256] = tile
+        left, _, _, top = _tile_bounds_merc(x0, y0, self.z)
+        _, bottom, right, _ = _tile_bounds_merc(x1, y1, self.z)
+        transform = from_bounds(left, bottom, right, top, out.shape[1], out.shape[0])
+        t = datetime.fromtimestamp(int(p["time"]), tz=timezone.utc)
+        return RadarFrame(t, out, transform, WEB_MERC, "RAINVIEWER")
+
+
+# ------------------------------------------------------------------ public API
+def fetch_latest_frames(n: int | None = None) -> list[RadarFrame]:
+    """Last n consecutive frames, oldest first. DPC primary, RainViewer fallback."""
+    n = n or settings.n_input_frames
+    with httpx.Client(timeout=30, headers=UA, follow_redirects=True) as c:
+        try:
+            frames = DPCClient(c).last_frames(n)
+            log.info("DPC: %d frames, latest %s", len(frames), frames[-1].time)
+            return frames
+        except Exception as exc:  # noqa: BLE001
+            log.warning("DPC ingest failed (%s); falling back to RainViewer", exc)
+        frames = RainViewerClient(c).last_frames(n)
+        log.info("RainViewer: %d frames, latest %s", len(frames), frames[-1].time)
+        return frames
+
+
+def latest_available_time() -> datetime | None:
+    """Cheap probe used by the scheduler to detect a new radar release."""
+    with httpx.Client(timeout=15, headers=UA) as c:
+        try:
+            return DPCClient(c).latest_time()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("DPC probe failed: %s", exc)
+        try:
+            m = c.get(settings.rainviewer_api).json()
+            return datetime.fromtimestamp(int(m["radar"]["past"][-1]["time"]), tz=timezone.utc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("All radar probes failed: %s", exc)
+            return None

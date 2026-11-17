@@ -1,0 +1,90 @@
+name: nowcast
+
+x-backend: &backend
+  build: ./backend
+  image: noctalix-nowcast-backend:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-noctalix}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-nowcast}
+    REDIS_URL: redis://redis:6379/0
+  volumes:
+    - nowcast_data:/data
+  depends_on:
+    db: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-noctalix}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-nowcast}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/app/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    <<: *backend
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "worker.scheduler"]
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits: { cpus: "1.8", memory: 3g }
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:-api-nowcast.noctalix.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api]
+    restart: unless-stopped
+    profiles: ["edge"]
+
+  # Alternative to caddy: Cloudflare Tunnel (no open ports).
+  # Exposes api-nowcast.noctalix.com through a Cloudflare Tunnel (TLS at the edge, no open ports).
+  # Enabled when CLOUDFLARE_TUNNEL_TOKEN is set:  docker compose --profile tunnel up -d
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [api]
+    restart: unless-stopped
+    profiles: ["tunnel"]
+
+volumes:
+  pgdata:
+  redisdata:
+  nowcast_data:
+  caddy_data:
+  caddy_config:

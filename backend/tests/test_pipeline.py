@@ -1,0 +1,83 @@
+from datetime import datetime, time, timedelta, timezone
+
+import numpy as np
+import pytest
+from rasterio.crs import CRS
+from rasterio.transform import from_origin
+
+from app.models import severity_for_dbz
+from worker.ingest_dpc import RadarFrame
+from worker.notifier import in_quiet_hours, should_send
+from worker.nowcast_engine import dbz_to_rain, rain_to_dbz, run_nowcast
+from worker.vectorizer import MercatorWarper, buffer_km, png_bytes, vectorize
+
+
+def synthetic_frames(n=6, shape=(300, 400), speed=3):
+    """Gaussian convective cell (peak 60 dBZ) drifting east `speed` px / 5 min over N Italy."""
+    t0 = datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc)
+    tr = from_origin(9.0, 46.0, 0.01, 0.01)
+    yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
+    frames = []
+    for i in range(n):
+        cx, cy = 100 + i * speed, 150
+        d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        dbz = 10 + 50 * np.exp(-d2 / (2 * 18 ** 2))
+        dbz += np.random.default_rng(i).normal(0, 0.5, shape)
+        frames.append(RadarFrame(t0 + timedelta(minutes=5 * i), dbz.astype("float32"), tr,
+                                 CRS.from_epsg(4326), "TEST"))
+    return frames
+
+
+def test_zr_roundtrip():
+    r = np.array([1.0, 10.0, 50.0])
+    assert np.allclose(dbz_to_rain(rain_to_dbz(r)), r)
+    assert abs(float(rain_to_dbz(np.array([1.0]))[0]) - 23.0) < 0.1  # 200 R^1.6 at 1 mm/h
+
+
+def test_severity():
+    assert severity_for_dbz(30) is None
+    assert severity_for_dbz(35) == "MODERATE"
+    assert severity_for_dbz(50) == "SEVERE"
+    assert severity_for_dbz(58) == "EXTREME"
+    assert buffer_km(60) == pytest.approx(7.5)
+
+
+def test_nowcast_and_vectorize():
+    frames = synthetic_frames()
+    res = run_nowcast(frames)
+    assert res.forecast_dbz.shape == (12, 300, 400)
+    assert res.lead_minutes[-1] == 60
+    # cell must keep moving east
+    last_obs_x = np.nanargmax(np.nanmax(frames[-1].dbz, axis=0))
+    fc_x = np.nanargmax(np.nanmax(np.where(np.isfinite(res.forecast_dbz[5]), res.forecast_dbz[5], -99), axis=0))
+    assert fc_x > last_obs_x
+    polys = vectorize(res)
+    sev = {p.severity_level for p in polys}
+    assert "MODERATE" in sev and "SEVERE" in sev
+    leads = {p.lead_time_minutes for p in polys}
+    assert 5 in leads
+    for p in polys:
+        assert p.geom.is_valid
+        minx, miny, maxx, maxy = p.geom.bounds
+        assert 8.5 < minx < maxx < 13.5 and 42.5 < miny < maxy < 46.5
+    # buffer grows with lead time
+    a5 = max(p.geom.area for p in polys if p.lead_time_minutes == 5 and p.threshold_dbz == 35)
+    a60 = [p.geom.area for p in polys if p.lead_time_minutes == 60 and p.threshold_dbz == 35]
+    if a60:
+        assert max(a60) > a5 * 0.8
+
+
+def test_render():
+    f = synthetic_frames(n=1)[0]
+    w = MercatorWarper(f.dbz.shape, f.transform, f.crs)
+    assert len(w.coordinates) == 4
+    assert png_bytes(w.warp(f.dbz))[:4] == b"\x89PNG"
+
+
+def test_quiet_hours():
+    now = datetime(2026, 7, 1, 22, 30, tzinfo=timezone.utc)  # 00:30 Europe/Rome (CEST)
+    assert in_quiet_hours(time(23, 0), time(7, 0), "Europe/Rome", now)
+    assert not in_quiet_hours(time(1, 0), time(7, 0), "Europe/Rome", now)
+    assert not in_quiet_hours(None, None, "Europe/Rome", now)
+    assert not should_send("MODERATE", True)
+    assert should_send("SEVERE", True) and should_send("EXTREME", True) and should_send("MODERATE", False)

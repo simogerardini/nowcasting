@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgis/postgis:16-3.4
+        env: { POSTGRES_USER: noctalix, POSTGRES_PASSWORD: password, POSTGRES_DB: nowcast }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U noctalix" --health-interval 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgresql+asyncpg://noctalix:password@localhost:5432/nowcast
+      REDIS_URL: redis://localhost:6379/0
+      LOCAL_ASSETS_DIR: /tmp/assets
+      RADAR_CACHE_DIR: /tmp/radar
+      VAPID_KEY_FILE: /tmp/vapid.json
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip, cache-dependency-path: backend/requirements.txt }
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - run: python -m tests.e2e_synthetic
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build

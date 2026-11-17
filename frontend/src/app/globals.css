@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body { height: 100%; background: #0b1020; color: #e2e8f0; overscroll-behavior: none; }
+body { -webkit-tap-highlight-color: transparent; }
+.maplibregl-popup-content { background: #121a33; color: #e2e8f0; border-radius: 10px; font-size: 13px; }
+.maplibregl-popup-tip { border-top-color: #121a33 !important; border-bottom-color: #121a33 !important; }
