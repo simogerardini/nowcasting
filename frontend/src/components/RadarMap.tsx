@@ -105,11 +105,9 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
       center: [12.5, 42.0],
       zoom: 5.2,
       maxZoom: 12,
-      attributionControl: { compact: true, customAttribution: "Radar © DPC / RainViewer · Fulmini © EUMETSAT · © OpenFreeMap © OpenStreetMap" },
+      attributionControl: false, // credits: minimal OSM line on the map + full list in the settings panel
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-    // start with the (compact) attribution collapsed
-    m.once("load", () => el.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show"));
     m.on("load", () => {
       m.addSource("risk", { type: "geojson", data: EMPTY_FC });
       m.addSource("lightning", { type: "geojson", data: EMPTY_FC });
@@ -286,6 +284,14 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
           {error}
         </div>
       )}
+      <a
+        href="https://www.openstreetmap.org/copyright"
+        target="_blank"
+        rel="noreferrer"
+        className="absolute bottom-[max(0.25rem,env(safe-area-inset-bottom))] right-2 z-10 text-[9px] text-white/35"
+      >
+        © OpenStreetMap
+      </a>
       {frame && (
         <div className="pointer-events-none absolute bottom-8 left-1/2 z-10 -translate-x-1/2 rounded-full bg-night-900/85 px-4 py-1.5 text-sm shadow-lg backdrop-blur">
           <span className={`font-mono ${frame.kind === "forecast" ? "text-amber-300" : "text-sky-200"}`}>

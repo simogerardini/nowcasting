@@ -223,6 +223,13 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
           <Reliability />
 
           {msg && <p className="text-xs text-sky-200">{msg}</p>}
+
+          <p className="border-t border-white/10 pt-3 text-[11px] leading-relaxed text-slate-500">
+            Dati: radar © <a className="underline" href="https://radar.protezionecivile.it" target="_blank" rel="noreferrer">Dipartimento Protezione Civile</a>
+            {" "}· RainViewer · fulmini © EUMETSAT (MTG Lightning Imager) · allerte MeteoAlarm · mappa ©{" "}
+            <a className="underline" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>, OpenMapTiles,{" "}
+            <a className="underline" href="https://openfreemap.org" target="_blank" rel="noreferrer">OpenFreeMap</a> · confini ISTAT.
+          </p>
         </div>
       )}
     </>
