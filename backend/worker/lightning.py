@@ -32,6 +32,7 @@ EPOCH_2000 = datetime(2000, 1, 1, tzinfo=timezone.utc)
 _token: tuple[str, float] | None = None
 _seen: dict[str, float] = {}  # product id -> processed at (monotonic)
 LAST_STATUS: dict = {}
+STATS = {"products": 0, "flashes_full_disc": 0, "last_product": None}
 
 
 def enabled() -> bool:
@@ -103,6 +104,7 @@ def _flashes_from_zip(content: bytes) -> list[tuple[float, float, float, float |
             if not name.endswith(".nc") or "TRAIL" in name.upper():
                 continue
             lat, lon, secs, rad = parse_lfl_netcdf(z.read(name))
+            STATS["flashes_full_disc"] += int(np.isfinite(lat).sum())
             m = (np.isfinite(lat) & np.isfinite(lon) & np.isfinite(secs)
                  & (lon >= BBOX[0]) & (lon <= BBOX[2]) & (lat >= BBOX[1]) & (lat <= BBOX[3]))
             for i in np.where(m)[0]:
@@ -127,6 +129,8 @@ def fetch_new_flashes(lookback_min: int = 40) -> list[tuple[float, float, float,
             fl = _flashes_from_zip(r.content)
             flashes.extend(fl)
             _seen[p["id"]] = time.monotonic()
+            STATS["products"] += 1
+            STATS["last_product"] = p["date"]
             log.info("LI product %s: %d flashes over Italy", p["date"], len(fl))
     for k in [k for k, v in _seen.items() if v < time.monotonic() - 6 * 3600]:
         del _seen[k]

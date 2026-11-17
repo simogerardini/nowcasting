@@ -77,6 +77,9 @@ async def lightning_tick(redis, storage: Storage) -> None:
                                     "application/geo+json", "public, max-age=60", True)
             sent = await notifier.notify_lightning(session, redis)
         lightning.save_status(last_ok=datetime.now(timezone.utc).isoformat(), new_flashes=len(flashes),
+                              products_total=lightning.STATS["products"],
+                              flashes_full_disc_total=lightning.STATS["flashes_full_disc"],
+                              last_product=lightning.STATS["last_product"],
                               flashes_60min=len(geo["features"]), notifications=sent, last_error=None)
     except Exception as exc:  # noqa: BLE001
         log.exception("Lightning cycle failed")
