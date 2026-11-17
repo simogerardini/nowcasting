@@ -46,6 +46,7 @@ image_for() {  # newest Ubuntu 24.04 (Minimal preferred) compatible with the sha
 IMG_MICRO=$(image_for VM.Standard.E2.1.Micro)
 IMG_A1=$(image_for VM.Standard.A1.Flex)
 echo "AD=$AD"; echo "SUBNET=$SUBNET"; echo "IMG_MICRO=$IMG_MICRO"; echo "IMG_A1=$IMG_A1"
+{ [ -z "$IMG_MICRO" ] && [ -z "$IMG_A1" ]; } && { echo "!! no Ubuntu 24.04 image found"; exit 1; }
 
 show_ip() { oci compute instance list-vnics --instance-id "$1" --query 'data[0]."public-ip"' --raw-output; }
 
