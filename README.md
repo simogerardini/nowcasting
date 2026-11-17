@@ -35,7 +35,7 @@ Chiavi VAPID: se `VAPID_*` è vuoto vengono generate al primo avvio e salvate in
 
 ```bash
 cp .env.example .env
-docker compose up -d --build            # db, redis, api (:8000), worker
+docker compose up -d --build            # db, redis, api (:8000), worker  (sviluppo)
 docker compose run --rm worker python -m pytest -q
 docker compose run --rm worker python -m tests.e2e_synthetic   # pipeline completa su dati sintetici
 cd frontend && npm ci && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
@@ -45,31 +45,36 @@ Senza credenziali R2 gli asset vengono scritti in `/data/assets` e serviti dall'
 
 ## Deploy — a costo zero
 
-Obiettivo: **0 € oltre all'abbonamento Claude**. Limiti applicati:
-
-| Workflow | Trigger | Minuti Actions |
+| Componente | Dove | Costo |
 |---|---|---|
-| `ci.yml` | solo manuale (`workflow_dispatch`, scope backend/frontend/all) | 0 se non lanciato; timeout 15/8 min |
-| `deploy-pages.yml` | solo manuale (fallback) | 0 se non lanciato; timeout 8 min |
-| `deploy-backend.yml` | push su `backend/app|worker`, `Dockerfile`, `requirements.txt`, compose | job **saltato (0 min)** finché la variabile `VPS_HOST` non esiste; poi ~1 min (build Docker sul VPS); timeout 6 min |
+| Frontend PWA | Cloudflare Pages (Git integration, build su Cloudflare, watch path `frontend/*`) | 0 (Free: 500 build/mese, oltre falliscono, nessun addebito) |
+| Database PostGIS | Supabase Free, progetto esistente, **schema `nowcast` + ruolo `nowcast` isolati**, RLS attivo | 0 (Free: 500 MB, nessuna carta) |
+| API + worker pySTEPS | Oracle Cloud Always Free **VM.Standard.E2.1.Micro** (AMD, 1 GB RAM + 4 GB swap), un solo container (`docker-compose.vps.yml`) + Caddy (TLS Let's Encrypt) | 0 (Always Free, senza upgrade a Pay As You Go) |
+| Asset radar | serviti dall'API dietro proxy Cloudflare con `Cache-Control` (R2 opzionale, disattivato) | 0 |
 
-Frontend: build e deploy sul **Cloudflare Pages Git integration** (build su Cloudflare, piano Free: 500 build/mese, nessun addebito oltre: le build in eccesso falliscono, non si pagano). Watch path `frontend/*`: i commit backend non generano build.
+Redis non è usato in produzione (store in-process, dedup durevole in `alert_history`); resta nel `docker-compose.yml` di sviluppo.
 
-Asset radar: **R2 disattivato di default** (R2 richiede metodo di pagamento e addebita oltre il free tier). Gli asset sono serviti dall'API dietro il proxy Cloudflare Free con `Cache-Control` (PNG per-run immutabili 24 h, `latest.json` 60 s, GeoJSON 180 s): la cache edge assorbe il traffico dei client.
-Se in futuro si abilita R2: ~210k scritture/mese (sotto 1M Class A gratuite), storage < 100 MB.
+### GitHub Actions (minuti minimi)
 
-Già configurato su Cloudflare: progetto Pages `nowcast` (`nowcast-biv.pages.dev`), dominio `nowcast.noctalix.com` + CNAME proxied.
-TLS API: Caddy ottiene certificato Let's Encrypt (HTTP-01 attraverso il proxy Cloudflare) → compatibile con SSL *Full (strict)*.
-
-### Configurazione GitHub (Settings → Secrets and variables → Actions)
-
-| Tipo | Nome | Uso |
+| Workflow | Trigger | Minuti |
 |---|---|---|
-| Variable | `VPS_HOST` | abilita il deploy backend |
-| Secret | `VPS_SSH_KEY` (+ opz. `VPS_USER`, `VPS_PORT`) | SSH verso il VPS |
-| Secret | `CLOUDFLARE_API_TOKEN` (opz.) | *Zone DNS: Edit* → record `api-nowcast` automatico; *Pages: Edit* per il fallback manuale |
+| `ci.yml` | solo manuale | 0 se non lanciato |
+| `deploy-pages.yml` | solo manuale (fallback: normalmente builda Cloudflare) | 0 se non lanciato |
+| `deploy-backend.yml` | push su `backend/**`, `docker-compose.vps.yml`, `Caddyfile` | 0 finché manca la variabile `VPS_HOST`; poi <1 min (build Docker in background sul VPS) |
 
-Consigliato: GitHub → Settings → Billing → Budgets: budget Actions **0 $** con "Stop usage" attivo.
+Configurazione (Settings → Secrets and variables → Actions):
+
+| Tipo | Nome | Valore |
+|---|---|---|
+| Variable | `VPS_HOST` | IPv4 pubblico VPS (crearla per ultima: abilita il deploy) |
+| Secret | `VPS_SSH_KEY` | chiave privata SSH |
+| Secret | `VPS_USER` | `ubuntu` |
+| Secret | `DATABASE_URL` | `postgresql+asyncpg://nowcast.<ref>:<pw>@aws-1-eu-north-1.pooler.supabase.com:5432/postgres?ssl=require` (pooler in *session mode*, porta 5432) |
+| Secret | `CLOUDFLARE_API_TOKEN` (opz.) | *Zone DNS: Edit* → record `api-nowcast` automatico |
+
+Chiavi VAPID: generate al primo avvio e persistite nel volume `nowcast_data` del VPS.
+
+Consigliato: GitHub → Settings → Billing → Budgets → budget Actions 0 $ con "Stop usage".
 
 ## Note / differenze rispetto alla specifica
 
