@@ -10,7 +10,14 @@ if ! command -v docker >/dev/null; then
 fi
 
 # Firewall: only SSH + HTTP(S) (HTTP needed for Let's Encrypt HTTP-01 through Cloudflare)
-if command -v ufw >/dev/null; then
+if [ -f /etc/iptables/rules.v4 ] && grep -q REJECT /etc/iptables/rules.v4; then
+  # Oracle Cloud images: iptables REJECT-all except SSH
+  for port in 80 443; do
+    iptables -C INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null \
+      || iptables -I INPUT 5 -p tcp -m state --state NEW --dport $port -j ACCEPT
+  done
+  command -v netfilter-persistent >/dev/null && netfilter-persistent save >/dev/null
+elif command -v ufw >/dev/null; then
   ufw allow OpenSSH >/dev/null; ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null
   ufw --force enable >/dev/null || true
 fi
