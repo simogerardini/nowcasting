@@ -38,9 +38,24 @@ app.add_middleware(
     max_age=86400,
 )
 
+class CachedAssets(StaticFiles):
+    """Local asset fallback (no R2): Cache-Control lets the Cloudflare free edge cache absorb client traffic."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        if resp.status_code == 200:
+            if path.startswith("frames/"):
+                resp.headers["Cache-Control"] = "public, max-age=86400, immutable"  # per-run, never changes
+            elif path == "latest.json":
+                resp.headers["Cache-Control"] = "public, max-age=60"
+            else:
+                resp.headers["Cache-Control"] = "public, max-age=180"
+        return resp
+
+
 if not settings.r2_enabled:
     Path(settings.local_assets_dir).mkdir(parents=True, exist_ok=True)
-    app.mount("/assets", StaticFiles(directory=settings.local_assets_dir), name="assets")
+    app.mount("/assets", CachedAssets(directory=settings.local_assets_dir), name="assets")
 
 
 def _validate_tz(tz: str | None) -> None:

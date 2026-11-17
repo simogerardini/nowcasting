@@ -205,8 +205,6 @@ def publish(result: NowcastResult, polys: list[RiskPolygon], storage: Storage, c
     geo = to_geojson(result, polys)
     geo_url = storage.put("latest_forecast.geojson", json.dumps(geo, separators=(",", ":")).encode(),
                           "application/geo+json", CACHE_FRESH, compress=True)
-    storage.put(f"frames/{run}/forecast.geojson", json.dumps(geo, separators=(",", ":")).encode(),
-                "application/geo+json", CACHE_IMMUTABLE, compress=True)
     manifest = {
         "run_timestamp": result.run_time.isoformat(),
         "source": result.source,

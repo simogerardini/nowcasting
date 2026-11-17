@@ -43,26 +43,33 @@ cd frontend && npm ci && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 
 Senza credenziali R2 gli asset vengono scritti in `/data/assets` e serviti dall'API su `/assets`.
 
-## Deploy (automatico)
+## Deploy — a costo zero
 
-| Workflow | Trigger | Cosa fa |
+Obiettivo: **0 € oltre all'abbonamento Claude**. Limiti applicati:
+
+| Workflow | Trigger | Minuti Actions |
 |---|---|---|
-| `ci.yml` | PR / push | pytest + e2e su PostGIS, typecheck + build frontend |
-| `deploy-pages.yml` | push `frontend/**` | build + `wrangler pages deploy` sul progetto Pages `nowcast` |
-| `deploy-backend.yml` | push `backend/**` | DNS `api-nowcast` → VPS, rsync, `scripts/vps-deploy.sh` (installa Docker, crea `.env` con password random, `docker compose --profile edge up -d`), health check |
+| `ci.yml` | solo manuale (`workflow_dispatch`, scope backend/frontend/all) | 0 se non lanciato; timeout 15/8 min |
+| `deploy-pages.yml` | solo manuale (fallback) | 0 se non lanciato; timeout 8 min |
+| `deploy-backend.yml` | push su `backend/app|worker`, `Dockerfile`, `requirements.txt`, compose | job **saltato (0 min)** finché la variabile `VPS_HOST` non esiste; poi ~1 min (build Docker sul VPS); timeout 6 min |
+
+Frontend: build e deploy sul **Cloudflare Pages Git integration** (build su Cloudflare, piano Free: 500 build/mese, nessun addebito oltre: le build in eccesso falliscono, non si pagano). Watch path `frontend/*`: i commit backend non generano build.
+
+Asset radar: **R2 disattivato di default** (R2 richiede metodo di pagamento e addebita oltre il free tier). Gli asset sono serviti dall'API dietro il proxy Cloudflare Free con `Cache-Control` (PNG per-run immutabili 24 h, `latest.json` 60 s, GeoJSON 180 s): la cache edge assorbe il traffico dei client.
+Se in futuro si abilita R2: ~210k scritture/mese (sotto 1M Class A gratuite), storage < 100 MB.
 
 Già configurato su Cloudflare: progetto Pages `nowcast` (`nowcast-biv.pages.dev`), dominio `nowcast.noctalix.com` + CNAME proxied.
 TLS API: Caddy ottiene certificato Let's Encrypt (HTTP-01 attraverso il proxy Cloudflare) → compatibile con SSL *Full (strict)*.
 
-### Secrets GitHub richiesti (Settings → Secrets and variables → Actions)
+### Configurazione GitHub (Settings → Secrets and variables → Actions)
 
-| Secret | Uso |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | permessi *Pages: Edit* + *Zone DNS: Edit* (noctalix.com) |
-| `VPS_HOST`, `VPS_SSH_KEY` (+ opz. `VPS_USER`, `VPS_PORT`) | deploy backend |
-| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (opzionali) | asset su R2 invece che dall'API |
+| Tipo | Nome | Uso |
+|---|---|---|
+| Variable | `VPS_HOST` | abilita il deploy backend |
+| Secret | `VPS_SSH_KEY` (+ opz. `VPS_USER`, `VPS_PORT`) | SSH verso il VPS |
+| Secret | `CLOUDFLARE_API_TOKEN` (opz.) | *Zone DNS: Edit* → record `api-nowcast` automatico; *Pages: Edit* per il fallback manuale |
 
-R2: creare bucket `noctalix-nowcast-assets` e collegare il custom domain `assets-nowcast.noctalix.com`; la policy CORS viene impostata dal worker all'avvio. Gli oggetti sono caricati con `Cache-Control: public, max-age=180` (frame PNG per-run: immutabili).
+Consigliato: GitHub → Settings → Billing → Budgets: budget Actions **0 $** con "Stop usage" attivo.
 
 ## Note / differenze rispetto alla specifica
 

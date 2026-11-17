@@ -1,14 +1,20 @@
 name: CI
 
+# Manual only (Actions minutes budget). Tests also run locally: see README.
 on:
-  pull_request:
-  push:
-    branches: [main]
-    paths-ignore: ["**.md"]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "backend | frontend | all"
+        default: backend
+
+concurrency: { group: ci, cancel-in-progress: true }
 
 jobs:
   backend:
+    if: inputs.scope != 'frontend'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       db:
         image: postgis/postgis:16-3.4
@@ -34,12 +40,13 @@ jobs:
       - run: python -m tests.e2e_synthetic
 
   frontend:
+    if: inputs.scope != 'backend'
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     defaults: { run: { working-directory: frontend } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm run build
+      - run: npm run build   # next build already type-checks
