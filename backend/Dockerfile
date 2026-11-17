@@ -17,7 +17,7 @@ RUN pip install --no-index --find-links=/wheels /wheels/*.whl && rm -rf /wheels 
 COPY . .
 RUN useradd -m -u 1000 app && mkdir -p /data && chown -R app /data /app
 USER app
-EXPOSE 8000
+EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
-    CMD python -c "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/v1/health',timeout=4)" || exit 1
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    CMD python -c "import os,urllib.request;urllib.request.urlopen('http://localhost:%s/api/v1/health'%os.environ.get('PORT','7860'),timeout=4)" || exit 1
+CMD ["./start.sh"]

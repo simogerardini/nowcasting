@@ -6,11 +6,11 @@ a stubbed push sender, and verifies polygons, alert_history, dedup and 410 clean
 import asyncio
 import uuid
 
-import redis.asyncio as aioredis
 from sqlalchemy import text
 
 from app.config import get_settings
 from app.database import SessionLocal, init_db
+from app.kv import get_kv
 from tests.test_pipeline import synthetic_frames
 from worker import notifier, pipeline
 from worker.storage import Storage
@@ -20,7 +20,7 @@ settings = get_settings()
 
 async def main():
     await init_db()
-    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    r = get_kv()
     await r.delete("nowcast:last_run")
     frames = synthetic_frames(shape=(300, 400))
     pipeline.fetch_latest_frames = lambda: frames  # inject

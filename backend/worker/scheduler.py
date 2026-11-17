@@ -10,11 +10,11 @@ import asyncio
 import logging
 import signal
 
-import redis.asyncio as aioredis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import get_settings
 from app.database import init_db
+from app.kv import get_kv
 from app.vapid import ensure_vapid_keys
 
 from .ingest_dpc import latest_available_time
@@ -28,7 +28,7 @@ settings = get_settings()
 LOCK_KEY = "nowcast:lock"
 
 
-async def radar_tick(redis: aioredis.Redis, storage: Storage, force: bool = False) -> None:
+async def radar_tick(redis, storage: Storage, force: bool = False) -> None:
     latest = await asyncio.to_thread(latest_available_time)
     last = await redis.get("nowcast:last_run")
     if not force and latest is not None and last == latest.isoformat():
@@ -45,7 +45,7 @@ async def radar_tick(redis: aioredis.Redis, storage: Storage, force: bool = Fals
         await redis.delete(LOCK_KEY)
 
 
-async def cap_tick(redis: aioredis.Redis) -> None:
+async def cap_tick(redis) -> None:
     try:
         await run_cap_cycle(redis)
     except Exception:  # noqa: BLE001
@@ -55,7 +55,7 @@ async def cap_tick(redis: aioredis.Redis) -> None:
 async def main(once: bool) -> None:
     await init_db()
     ensure_vapid_keys(settings)
-    redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    redis = get_kv()
     storage = Storage()
     if once:
         await cap_tick(redis)

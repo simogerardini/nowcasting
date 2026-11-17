@@ -6,7 +6,6 @@ import logging
 import time
 from datetime import datetime, timedelta
 
-import redis.asyncio as aioredis
 from sqlalchemy import text
 
 from app.config import get_settings
@@ -27,7 +26,7 @@ VALUES (:run, :lead, :sev, :max_dbz, :rain, ST_Multi(ST_GeomFromText(:wkt, 4326)
 """)
 
 
-async def run_cycle(redis: aioredis.Redis, storage: Storage) -> datetime | None:
+async def run_cycle(redis, storage: Storage) -> datetime | None:
     t0 = time.perf_counter()
     frames = await asyncio.to_thread(fetch_latest_frames)
     run_time = frames[-1].time
@@ -68,7 +67,7 @@ async def run_cycle(redis: aioredis.Redis, storage: Storage) -> datetime | None:
     return run_time
 
 
-async def run_cap_cycle(redis: aioredis.Redis) -> None:
+async def run_cap_cycle(redis) -> None:
     alerts = await asyncio.to_thread(cap.fetch_cap_alerts)
     async with SessionLocal() as session:
         await cap.store_cap_alerts(session, alerts)

@@ -43,6 +43,7 @@ services:
 
   api:
     <<: *backend
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "127.0.0.1:8000:8000"
 
@@ -55,36 +56,7 @@ services:
       resources:
         limits: { cpus: "1.8", memory: 3g }
 
-  caddy:
-    image: caddy:2-alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      API_DOMAIN: ${API_DOMAIN:-api-nowcast.noctalix.com}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on: [api]
-    restart: unless-stopped
-    profiles: ["edge"]
-
-  # Alternative to caddy: Cloudflare Tunnel (no open ports).
-  # Exposes api-nowcast.noctalix.com through a Cloudflare Tunnel (TLS at the edge, no open ports).
-  # Enabled when CLOUDFLARE_TUNNEL_TOKEN is set:  docker compose --profile tunnel up -d
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: ["tunnel", "--no-autoupdate", "run"]
-    environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
-    depends_on: [api]
-    restart: unless-stopped
-    profiles: ["tunnel"]
-
 volumes:
   pgdata:
   redisdata:
   nowcast_data:
-  caddy_data:
-  caddy_config:

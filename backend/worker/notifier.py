@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-import redis.asyncio as aioredis
 from pywebpush import WebPushException, webpush
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -140,7 +139,7 @@ def _send_sync(n: Notification) -> int:
         return 0
 
 
-async def deliver(session: AsyncSession, redis: aioredis.Redis, batch: list[Notification]) -> int:
+async def deliver(session: AsyncSession, redis, batch: list[Notification]) -> int:
     sem = asyncio.Semaphore(settings.push_concurrency)
     sent, gone = 0, []
 
@@ -173,7 +172,7 @@ async def deliver(session: AsyncSession, redis: aioredis.Redis, batch: list[Noti
     return sent
 
 
-async def notify_radar(session: AsyncSession, redis: aioredis.Redis, run_time: datetime) -> int:
+async def notify_radar(session: AsyncSession, redis, run_time: datetime) -> int:
     rows = (await session.execute(MATCH_SQL, {"current_run": run_time, "dedup": settings.dedup_minutes})).mappings().all()
     batch = []
     for r in rows:
@@ -187,7 +186,7 @@ async def notify_radar(session: AsyncSession, redis: aioredis.Redis, run_time: d
     return sent
 
 
-async def notify_cap(session: AsyncSession, redis: aioredis.Redis) -> int:
+async def notify_cap(session: AsyncSession, redis) -> int:
     rows = (await session.execute(CAP_MATCH_SQL)).mappings().all()
     batch = []
     for r in rows:

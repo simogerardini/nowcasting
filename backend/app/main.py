@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
 from .database import get_session, init_db
+from .kv import MemoryKV, get_kv
 from .models import LocationIn, ResubscribeIn, SettingsIn, SubscribeIn, SubscriptionOut, UnsubscribeIn
 from .vapid import ensure_vapid_keys
 
@@ -24,7 +24,7 @@ log = logging.getLogger("api")
 async def lifespan(app: FastAPI):
     await init_db()
     ensure_vapid_keys(settings)
-    app.state.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+    app.state.redis = get_kv()
     yield
     await app.state.redis.aclose()
 
@@ -87,7 +87,7 @@ async def health(session: AsyncSession = Depends(get_session)):
         out["status"] = "degraded"
     try:
         await app.state.redis.ping()
-        out["redis"] = "ok"
+        out["redis"] = "memory" if isinstance(app.state.redis, MemoryKV) else "ok"
     except Exception as exc:  # noqa: BLE001
         out["redis"] = f"error: {exc.__class__.__name__}"
         out["status"] = "degraded"

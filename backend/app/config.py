@@ -7,7 +7,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://noctalix:password@db:5432/nowcast"
-    redis_url: str = "redis://redis:6379/0"
+    redis_url: str = ""          # empty = in-process store (single container, e.g. HF Spaces)
+    db_pool_size: int = 3
+    db_max_overflow: int = 2
 
     vapid_public_key: str = ""
     vapid_private_key: str = ""

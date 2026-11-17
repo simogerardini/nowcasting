@@ -63,3 +63,11 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     duration_s FLOAT NOT NULL,
     finished_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Supabase exposes the public schema through its Data API: RLS with no policies blocks anon/authenticated
+-- roles entirely (the backend connects as table owner and is unaffected). Harmless on plain Postgres.
+ALTER TABLE user_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE forecast_polygons ENABLE ROW LEVEL SECURITY;
+ALTER TABLE alert_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cap_alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pipeline_runs ENABLE ROW LEVEL SECURITY;
