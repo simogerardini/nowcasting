@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import logging
 import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -152,20 +153,39 @@ class RainViewerClient:
         meta = self.c.get(settings.rainviewer_api)
         meta.raise_for_status()
         m = meta.json()
-        past = m["radar"]["past"][-n:]
-        if len(past) < n:
-            raise IngestError("RainViewer: not enough frames")
-        frames = []
-        for p in past:
+        past = m["radar"]["past"]
+        frames: list[RadarFrame] = []
+        # newest -> oldest; a frame whose tiles are not all published yet is skipped (not cached)
+        for p in reversed(past):
+            if len(frames) == n:
+                break
             if p["path"] not in _RV_CACHE:
-                _RV_CACHE[p["path"]] = self._frame(m["host"], p)
+                frame = self._frame(m["host"], p)
+                if frame is None:
+                    if not frames:
+                        log.info("RainViewer frame %s incomplete, using the previous one", p["time"])
+                        continue
+                    break  # gap in the middle: stop, keep consecutive frames only
+                _RV_CACHE[p["path"]] = frame
             frames.append(_RV_CACHE[p["path"]])
-        keep = {p["path"] for p in m["radar"]["past"]}
+        # tiles can be served (HTTP 200) before rendering is complete: a newest frame with far less
+        # echo than the previous one is treated as incomplete and re-downloaded next time
+        if len(frames) >= 2:
+            wet = [int((np.nan_to_num(f.dbz, nan=-np.inf, neginf=-np.inf) > 0).sum()) for f in frames[:2]]
+            if wet[1] > 2000 and wet[0] < 0.3 * wet[1]:
+                log.warning("RainViewer newest frame looks incomplete (%d vs %d wet px): skipped", *wet)
+                stale = [k for k, v in _RV_CACHE.items() if v is frames[0]]
+                for k in stale:
+                    del _RV_CACHE[k]
+                frames = frames[1:]
+        if len(frames) < 3:
+            raise IngestError("RainViewer: not enough complete frames")
+        keep = {p["path"] for p in past}
         for k in [k for k in _RV_CACHE if k not in keep]:
             del _RV_CACHE[k]
-        return frames
+        return list(reversed(frames))
 
-    def _frame(self, host: str, p: dict) -> RadarFrame:
+    def _frame(self, host: str, p: dict) -> RadarFrame | None:
         from concurrent.futures import ThreadPoolExecutor
 
         x0, y0 = _tile_xy(self.bbox[0], self.bbox[3], self.z)
@@ -179,8 +199,18 @@ class RainViewerClient:
             return tx, ty, snow_opt, (r.content if r.status_code == 200 else None)
 
         jobs = [(tx, ty, so) for ty in range(y0, y1 + 1) for tx in range(x0, x1 + 1) for so in (0, 1)]
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            tiles = list(ex.map(lambda j: get(*j), jobs))
+        tiles = []
+        for attempt in range(3):  # retry tiles not (yet) available
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                got = list(ex.map(lambda j: get(*j), jobs))
+            tiles += [t for t in got if t[3] is not None]
+            jobs = [(t[0], t[1], t[2]) for t in got if t[3] is None]
+            if not jobs:
+                break
+            time.sleep(2 + 3 * attempt)
+        if jobs:
+            log.warning("RainViewer frame %s: %d tiles missing after retries", p["time"], len(jobs))
+            return None
         for tx, ty, snow_opt, content in tiles:
             if content is None:
                 continue
