@@ -10,7 +10,7 @@ backend/   FastAPI + worker pySTEPS (LK + S-PROG) + PostGIS + Redis → VPS (doc
 
 ## Pipeline (ogni nuovo scan radar, polling 60 s)
 
-1. `ingest_dpc.py` – ultimi 6 frame **VMI** DPC (`radar-api.protezionecivile.it`), cache su disco; fallback RainViewer (tile dBZ grezzi).
+1. `ingest_dpc.py` – ultimi 6 frame **VMI** DPC (API REST dal 12/01/2026: `GET /findLastProductByType`, `POST /downloadProduct` → URL S3, header `Origin` obbligatorio), 1 km / 5 min, + **POH** (probabilità di grandine); maschera neve da RainViewer. Fallback: RainViewer (tile "Universal Blue" decodificate in dBZ, 10 min). Controllo qualità: clamp 70 dBZ, filtro clutter statico.
 2. `nowcast_engine.py` – filtro < 15 dBZ, Z-R Marshall-Palmer (a=200, b=1.6), optical flow Lucas-Kanade, **S-PROG** 12×5 min.
 3. `vectorizer.py` – contorni 35/45/55 dBZ, buffer `1.5 + 0.1·lead` km (EPSG:3035), PostGIS `forecast_polygons` (retention 2 h), PNG Web-Mercator dei frame −25…+60 min, `latest.json` + `latest_forecast.geojson` (gzip) su R2.
 4. `notifier.py` – query `ST_Intersects`, priorità al lead time più breve, dedup 45 min con *upgrade* di severità, quiet hours (solo MODERATE silenziati, nel fuso dell'utente), rimozione endpoint 404/410, lock Redis anti-duplicati.
@@ -83,4 +83,4 @@ Consigliato: GitHub → Settings → Billing → Budgets → budget Actions 0 $ 
 - Dedup: blocca severità uguale **o inferiore** nei 45 min (la query della spec lasciava passare i downgrade).
 - Allerte CAP Italia: MeteoAlarm usa geocode EMMA_ID senza poligoni; i poligoni vengono letti se presenti, altrimenti da un GeoJSON di geocode opzionale (`CAP_GEOCODES_URL` / `/data/cap_geocodes.geojson`). Senza questo file le allerte CAP non georeferenziate vengono ignorate.
 - Blitzortung (fase 2) non implementato.
-- Endpoint DPC/RainViewer implementati secondo le API pubbliche note; non verificabili dall'ambiente di sviluppo (rete bloccata) → controllare `/api/v1/health.last_run` dopo il primo deploy.
+- Fonte radar attiva e motivo di eventuale fallback visibili in `/api/v1/health` (`last_run.source`, `worker.dpc_error`).

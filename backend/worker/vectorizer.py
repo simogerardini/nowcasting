@@ -99,7 +99,7 @@ def _components(mask: np.ndarray, field: np.ndarray, transform, crs, buf_m: floa
 
 
 def vectorize_field(dbz: np.ndarray, transform, crs, lead_min: int, snow: np.ndarray | None = None,
-                    events: list[str] | None = None) -> list[RiskPolygon]:
+                    events: list[str] | None = None, poh: np.ndarray | None = None) -> list[RiskPolygon]:
     """One forecast step -> risk polygons per event type (rain thresholds + snow mask)."""
     field = np.where(np.isfinite(dbz), dbz, -np.inf)
     is_snow = (snow > 0.5) if snow is not None else np.zeros(field.shape, dtype=bool)
@@ -111,6 +111,9 @@ def vectorize_field(dbz: np.ndarray, transform, crs, lead_min: int, snow: np.nda
         if lead_min > RADAR_EVENTS[event]["max_lead"]:
             continue
         mask = field >= thr
+        if event == "HAIL" and poh is not None:
+            # DPC Probability Of Hail: hail where POH >= 50% inside a convective core (>= 45 dBZ)
+            mask |= (poh >= 0.5) & (field >= 45)
         if event == "RAIN_START":
             mask &= ~is_snow  # snow onset is its own event
         if not mask.any():
@@ -138,7 +141,8 @@ def vectorize(result: NowcastResult) -> list[RiskPolygon]:
                                      events=["RAIN_START", "SNOW"]))
     for i, lead in enumerate(result.lead_minutes):
         snow = result.snow_fc[i] if result.snow_fc is not None else None
-        polys.extend(vectorize_field(result.forecast_dbz[i], result.transform, result.crs, lead, snow))
+        poh = result.poh_fc[i] if result.poh_fc is not None else None
+        polys.extend(vectorize_field(result.forecast_dbz[i], result.transform, result.crs, lead, snow, poh=poh))
     log.info("Vectorized %d risk polygons", len(polys))
     return polys
 

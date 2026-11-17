@@ -137,3 +137,17 @@ def test_rainviewer_unknown_colours_never_hail():
     assert d[0, 0] <= 50 and abs(d[0, 1] - 15) < 0.5 and np.isnan(d[1, 1])
     m = snow_mask(img)
     assert m[1, 0] and not m[0, 0] and not m[0, 1]
+
+
+def test_dpc_geotiff_sentinels():
+    """DPC: -9999 = outside coverage (NaN), -9998 = no echo inside coverage (dry, -inf)."""
+    import rasterio
+    from rasterio.transform import from_origin as fo
+    from worker.ingest_dpc import _read_geotiff
+    arr = np.array([[-9999, -9998], [25.5, 40.0]], dtype="float32")
+    with rasterio.MemoryFile() as mem:
+        with mem.open(driver="GTiff", height=2, width=2, count=1, dtype="float32",
+                      crs="EPSG:4326", transform=fo(10, 45, 1, 1)) as ds:
+            ds.write(arr, 1)
+        f = _read_geotiff(mem.read(), datetime(2026, 1, 1, tzinfo=timezone.utc), "DPC")
+    assert np.isnan(f.dbz[0, 0]) and np.isneginf(f.dbz[0, 1]) and f.dbz[1, 1] == 40.0

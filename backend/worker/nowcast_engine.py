@@ -31,6 +31,7 @@ class NowcastResult:
     source: str
     elapsed_s: float
     snow_fc: np.ndarray | None = None  # (T, H, W) advected snow fraction 0..1 (None = unknown)
+    poh_fc: np.ndarray | None = None   # (T, H, W) advected probability of hail 0..1 (DPC POH)
     observed_dbz: np.ndarray | None = None  # last observed frame, filtered (for "already raining" checks)
 
 
@@ -88,12 +89,13 @@ def run_nowcast(frames: list[RadarFrame]) -> NowcastResult:
     dt_in = float(np.median(diffs)) if diffs else settings.timestep_min
     steps: int | list[float] = n if abs(dt_in - settings.timestep_min) < 0.5 else [m / dt_in for m in lead]
 
-    filtered = [RadarFrame(f.time, preprocess(f.dbz), f.transform, f.crs, f.source, f.snow) for f in frames]
+    filtered = [RadarFrame(f.time, preprocess(f.dbz), f.transform, f.crs, f.source, f.snow, f.poh) for f in frames]
     coverage = ~np.isnan(frames[-1].dbz)  # radar footprint (-inf = observed dry)
     stack = np.stack([_to_db_rain(f.dbz) for f in filtered])  # (T,H,W) dB(R), no NaN
 
     wet_frac = float((stack[-1] > DB_ZERO).mean())
     snow_fc = None
+    poh_fc = None
     if wet_frac < 1e-5:
         log.info("No significant echoes - empty forecast")
         fc = np.full((n,) + stack.shape[1:], -np.inf, dtype="float32")
@@ -113,11 +115,16 @@ def run_nowcast(frames: list[RadarFrame]) -> NowcastResult:
             fc_db = nowcasts.get_method("extrapolation")(stack[-1], velocity, steps)
         fc_db = np.nan_to_num(np.asarray(fc_db), nan=DB_ZERO)
         fc = np.stack([_from_db_rain(fc_db[i]) for i in range(n)])
-        last_snow = frames[-1].snow
-        if last_snow is not None and float(np.asarray(last_snow).max()) > 0:
-            sl = extrapolation.get_method("semilagrangian")
-            snow_fc = np.clip(np.nan_to_num(sl(np.asarray(last_snow, dtype="float64"), velocity, steps), nan=0.0), 0, 1)
-            snow_fc = snow_fc.astype("float32")
+        sl = extrapolation.get_method("semilagrangian")
+
+        def advect(field):  # Lagrangian persistence of an auxiliary field along the LK motion
+            return np.clip(np.nan_to_num(sl(np.asarray(field, dtype="float64"), velocity, steps), nan=0.0),
+                           0, 1).astype("float32")
+
+        if frames[-1].snow is not None and float(np.asarray(frames[-1].snow).max()) > 0:
+            snow_fc = advect(frames[-1].snow)
+        if frames[-1].poh is not None and float(np.asarray(frames[-1].poh).max()) > 0:
+            poh_fc = advect(frames[-1].poh)
 
     fc[:, ~coverage] = np.nan
     elapsed = time.perf_counter() - t0
@@ -126,7 +133,7 @@ def run_nowcast(frames: list[RadarFrame]) -> NowcastResult:
     return NowcastResult(
         run_time=frames[-1].time, observed=filtered, forecast_dbz=fc, lead_minutes=lead,
         transform=frames[-1].transform, crs=frames[-1].crs, source=frames[-1].source, elapsed_s=elapsed,
-        snow_fc=snow_fc, observed_dbz=filtered[-1].dbz,
+        snow_fc=snow_fc, poh_fc=poh_fc, observed_dbz=filtered[-1].dbz,
     )
 
 

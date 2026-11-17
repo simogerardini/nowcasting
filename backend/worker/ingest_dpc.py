@@ -34,6 +34,7 @@ class RadarFrame:
     crs: CRS
     source: str
     snow: np.ndarray | None = None  # bool/fraction mask of snow echoes (RainViewer only)
+    poh: np.ndarray | None = None   # probability of hail 0..1 (DPC POH product, newest frame only)
 
 
 class IngestError(RuntimeError):
@@ -49,16 +50,22 @@ def _read_geotiff(content: bytes, t: datetime, source: str) -> RadarFrame:
     with rasterio.MemoryFile(content) as mem, mem.open() as ds:
         arr = ds.read(1).astype("float32")
         nodata = ds.nodata
+        dry = arr == -9998            # DPC: inside radar coverage, no echo
+        missing = (arr == -9999) | (arr < -100) | (arr > 100)
         if nodata is not None:
-            arr[arr == nodata] = np.nan
-        arr[(arr < -100) | (arr > 100)] = np.nan  # DPC uses -9999 / large sentinels
+            missing |= arr == nodata
+        arr[dry] = -np.inf
+        arr[missing & ~dry] = np.nan
         crs = ds.crs or CRS.from_epsg(4326)
         return RadarFrame(t, arr, ds.transform, crs, source)
 
 
 # ------------------------------------------------------------------ DPC
 class DPCClient:
-    """Client for the DPC Radar open API (https://radar.protezionecivile.it)."""
+    """Client for the DPC Radar REST API (https://dpc-radar.readthedocs.io/it/latest/api.html).
+
+    Since 12/01/2026: GET /findLastProductByType?type=..., POST /downloadProduct -> pre-signed S3 URL;
+    every request must carry an Origin header (documented requirement)."""
 
     def __init__(self, client: httpx.Client, product: str | None = None):
         self.c = client
@@ -66,36 +73,52 @@ class DPCClient:
         self.product = product or settings.radar_product
         self.cache = Path(settings.radar_cache_dir)
         self.cache.mkdir(parents=True, exist_ok=True)
+        self.headers = {"Origin": settings.dpc_origin}
 
-    def latest_time(self) -> datetime:
-        r = self.c.get(f"{self.base}/wide/product/findLastProductByType", params={"type": self.product})
+    def latest_time(self, product: str | None = None) -> datetime:
+        r = self.c.get(f"{self.base}/findLastProductByType", params={"type": product or self.product},
+                       headers=self.headers)
         r.raise_for_status()
         items = r.json().get("lastProducts") or []
         if not items:
             raise IngestError("DPC: no lastProducts")
         return datetime.fromtimestamp(int(items[0]["time"]) / 1000, tz=timezone.utc)
 
-    def _download(self, t: datetime) -> bytes:
+    def _download(self, t: datetime, product: str) -> bytes:
         ms = int(t.timestamp() * 1000)
-        r = self.c.post(f"{self.base}/wide/product/downloadProduct",
-                        json={"productType": self.product, "productDate": ms})
+        r = self.c.post(f"{self.base}/downloadProduct", json={"productType": product, "productDate": ms},
+                        headers=self.headers)
         r.raise_for_status()
-        if r.headers.get("content-type", "").startswith("application/json"):
-            url = r.json().get("url")
-            if not url:
-                raise IngestError(f"DPC: no url for {t}")
-            r = self.c.get(url)
-            r.raise_for_status()
-        return r.content
+        url = r.json().get("url")
+        if not url:
+            raise IngestError(f"DPC: no url for {product} {t}")
+        f = self.c.get(url)  # pre-signed S3 URL (expires in minutes)
+        f.raise_for_status()
+        return f.content
 
-    def frame(self, t: datetime) -> RadarFrame:
-        path = self.cache / f"{self.product}_{t:%Y%m%d%H%M}.tif"
+    def frame(self, t: datetime, product: str | None = None) -> RadarFrame:
+        product = product or self.product
+        path = self.cache / f"{product}_{t:%Y%m%d%H%M}.tif"
         if path.exists():
             content = path.read_bytes()
         else:
-            content = self._download(t)
-            path.write_bytes(content)
+            content = self._download(t, product)
+            tmp = path.with_suffix(".part")
+            tmp.write_bytes(content)
+            tmp.replace(path)
         return _read_geotiff(content, t, "DPC")
+
+    def poh(self, t: datetime) -> np.ndarray | None:
+        """Probability of hail (0..1) at time t, NaN outside coverage; None if unavailable."""
+        try:
+            f = self.frame(t, "POH")
+        except Exception as exc:  # noqa: BLE001
+            log.info("DPC POH unavailable for %s: %s", t, exc)
+            return None
+        p = np.where(np.isfinite(f.dbz), f.dbz, 0.0).astype("float32")
+        if np.nanmax(p) > 1.0:  # percent -> fraction
+            p = p / 100.0
+        return np.clip(p, 0, 1)
 
     def last_frames(self, n: int) -> list[RadarFrame]:
         latest = self.latest_time()
@@ -103,12 +126,17 @@ class DPCClient:
         for i in range(n - 1, -1, -1):
             t = latest - timedelta(minutes=settings.timestep_min * i)
             frames.append(self.frame(t))
+        if settings.use_poh:
+            poh = self.poh(latest)
+            if poh is not None and poh.shape == frames[-1].dbz.shape:
+                last = frames[-1]
+                frames[-1] = RadarFrame(last.time, last.dbz, last.transform, last.crs, last.source, None, poh)
         self._prune_cache(latest)
         return frames
 
     def _prune_cache(self, latest: datetime) -> None:
         cutoff = latest - timedelta(hours=3)
-        for p in self.cache.glob(f"{self.product}_*.tif"):
+        for p in self.cache.glob("*_*.tif"):
             try:
                 ts = datetime.strptime(p.stem.split("_")[1], "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
                 if ts < cutoff:
@@ -238,7 +266,7 @@ def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = Non
     from rasterio.windows import from_bounds as win_from_bounds
 
     factor = factor or settings.radar_downsample
-    arr, tr, snow = f.dbz, f.transform, f.snow
+    arr, tr, snow, poh = f.dbz, f.transform, f.snow, f.poh
     if f.crs and not f.crs.is_geographic:
         t = Transformer.from_crs("EPSG:4326", f.crs, always_xy=True)
         (x0, x1), (y0, y1) = t.transform([bbox[0], bbox[2]], [bbox[1], bbox[3]])
@@ -250,6 +278,7 @@ def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = Non
     if r1 > r0 and c1 > c0:
         arr = arr[r0:r1, c0:c1]
         snow = snow[r0:r1, c0:c1] if snow is not None else None
+        poh = poh[r0:r1, c0:c1] if poh is not None else None
         tr = tr * Affine.translation(c0, r0)
     if factor and factor > 1:
         h, w = (arr.shape[0] // factor) * factor, (arr.shape[1] // factor) * factor
@@ -263,8 +292,10 @@ def crop_and_downsample(f: RadarFrame, bbox=ITALY_BBOX, factor: int | None = Non
         out[missing] = np.nan
         if snow is not None:
             snow = snow[:h, :w].astype("float32").reshape(blocks.shape).mean(axis=(1, 3))
+        if poh is not None:  # max-pool: a hail core must not be diluted away
+            poh = poh[:h, :w].reshape(blocks.shape).max(axis=(1, 3))
         arr, tr = out, tr * Affine.scale(factor, factor)
-    return RadarFrame(f.time, arr, tr, f.crs, f.source, snow)
+    return RadarFrame(f.time, arr, tr, f.crs, f.source, snow, poh)
 
 
 # ------------------------------------------------------------------ quality control
@@ -295,7 +326,7 @@ def remove_static_clutter(frames: list[RadarFrame], strong: float = 40.0, persis
             new = f.dbz.copy()
             new[bad] = np.where(context[bad] >= settings.min_dbz, context[bad], -np.inf)
             removed += int(bad.sum())
-            out.append(RadarFrame(f.time, new, f.transform, f.crs, f.source, f.snow))
+            out.append(RadarFrame(f.time, new, f.transform, f.crs, f.source, f.snow, f.poh))
         else:
             out.append(f)
     if removed:
@@ -306,11 +337,29 @@ def remove_static_clutter(frames: list[RadarFrame], strong: float = 40.0, persis
 def clamp_reflectivity(f: RadarFrame, max_dbz: float = 70.0) -> RadarFrame:
     d = f.dbz.copy()
     d[np.isfinite(d) & (d > max_dbz)] = max_dbz
-    return RadarFrame(f.time, d, f.transform, f.crs, f.source, f.snow)
+    return RadarFrame(f.time, d, f.transform, f.crs, f.source, f.snow, f.poh)
 
 
 def quality_control(frames: list[RadarFrame]) -> list[RadarFrame]:
     return remove_static_clutter([clamp_reflectivity(f) for f in frames])
+
+
+def attach_rainviewer_snow(c: httpx.Client, f: RadarFrame) -> RadarFrame:
+    """DPC has no precipitation-type product: borrow RainViewer's snow mask (newest complete frame),
+    reprojected onto the DPC grid. Best effort: on any failure the frame is returned unchanged."""
+    from rasterio.warp import Resampling, reproject
+
+    try:
+        rv = RainViewerClient(c).last_frames(3)[-1]
+        if rv.snow is None or not rv.snow.any():
+            return f
+        dst = np.zeros(f.dbz.shape, dtype="float32")
+        reproject(rv.snow.astype("float32"), dst, src_transform=rv.transform, src_crs=rv.crs,
+                  dst_transform=f.transform, dst_crs=f.crs, resampling=Resampling.average)
+        return RadarFrame(f.time, f.dbz, f.transform, f.crs, f.source, dst, f.poh)
+    except Exception as exc:  # noqa: BLE001
+        log.info("RainViewer snow mask unavailable: %s", exc)
+        return f
 
 
 # ------------------------------------------------------------------ public API
@@ -320,7 +369,9 @@ def fetch_latest_frames(n: int | None = None) -> list[RadarFrame]:
     n = n or settings.n_input_frames
     with httpx.Client(timeout=30, headers=UA, follow_redirects=True) as c:
         try:
-            frames = quality_control([crop_and_downsample(f) for f in DPCClient(c).last_frames(n)])
+            raw = DPCClient(c).last_frames(n)
+            raw[-1] = attach_rainviewer_snow(c, raw[-1])
+            frames = quality_control([crop_and_downsample(f) for f in raw])
             LAST_DPC_ERROR = None
             log.info("DPC: %d frames, latest %s, grid %s", len(frames), frames[-1].time, frames[-1].dbz.shape)
             return frames
