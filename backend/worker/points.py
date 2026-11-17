@@ -96,7 +96,8 @@ SELECT event_type, count(*) AS alerts,
        count(*) FILTER (WHERE verified) AS hits,
        count(*) FILTER (WHERE verified = false) AS false_alarms,
        count(*) FILTER (WHERE verified IS NULL) AS pending
-FROM alert_history WHERE source = 'RADAR' AND sent_at > NOW() - make_interval(days => CAST(:days AS INT))
+FROM alert_history WHERE source = 'RADAR' AND eta IS NOT NULL  -- alerts issued by the calibrated model
+  AND sent_at > NOW() - make_interval(days => CAST(:days AS INT))
 GROUP BY event_type ORDER BY event_type
 """)
 
