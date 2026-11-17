@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.events import CAP_EVENTS, RADAR_EVENTS, SEVERITY_RANK, sql_rank
+from app.events import CAP_EVENTS, LIGHTNING_EVENTS, RADAR_EVENTS, SEVERITY_RANK, sql_rank
 
 log = logging.getLogger("notifier")
 settings = get_settings()
@@ -30,7 +30,11 @@ MATCH_SQL = text(f"""
 SELECT DISTINCT ON (u.id)
     u.id AS user_id, u.endpoint, u.p256dh, u.auth,
     u.quiet_hours_start, u.quiet_hours_end, u.timezone,
-    f.lead_time_minutes, f.severity_level, f.event_type, f.estimated_rain_mmh, f.max_dbz
+    f.lead_time_minutes, f.severity_level, f.event_type, f.estimated_rain_mmh, f.max_dbz,
+    (SELECT count(*) FROM lightning_flashes l
+      WHERE l.flash_time > NOW() - INTERVAL '15 minutes'
+        AND ST_DWithin(l.geom, u.location, 0.4)
+        AND ST_DWithin(l.geom::geography, u.location::geography, 30000)) AS flashes_near
 FROM user_subscriptions u
 JOIN forecast_polygons f ON ST_Intersects(u.location, f.geom)
 WHERE f.run_timestamp = :current_run
@@ -132,7 +136,10 @@ def build_radar_payload(row, run_time: datetime) -> dict:
         "CLOUDBURST": f"Nubifragio / temporale forte (~{rain:.0f} mm/h) sulla tua posizione verso le {eta:%H:%M}.",
         "HAIL": f"Cella molto intensa ({row['max_dbz']:.0f} dBZ): possibile grandine e raffiche verso le {eta:%H:%M}.",
         "SNOW": f"Neve in arrivo sulla tua posizione verso le {eta:%H:%M}.",
-    }[ev] + " Tocca per aprire il radar."
+    }[ev]
+    if row.get("flashes_near") and ev in ("HEAVY_RAIN", "CLOUDBURST", "HAIL"):
+        body += f" ⚡ Attività elettrica in zona ({row['flashes_near']} fulmini entro 30 km)."
+    body += " Tocca per aprire il radar."
     return {
         "title": title, "body": body, "icon": "/icons/storm-alert.png", "badge": "/icons/badge.png",
         "tag": f"nowcast-{ev}", "renotify": SEVERITY_RANK[sev] >= 2,
@@ -189,7 +196,7 @@ async def deliver(session: AsyncSession, redis, batch: list[Notification]) -> in
         nonlocal sent
         # Redis TTL guard against concurrent/duplicate runs
         key = f"alert:{n.source}:{n.user_id}:{n.ref or n.event_type or n.severity}"
-        ttl = settings.dedup_minutes * 60 if n.source == "RADAR" else 7 * 86400
+        ttl = settings.dedup_minutes * 60 if n.source in ("RADAR", "LIGHT") else 7 * 86400
         if not await redis.set(key, "1", ex=ttl, nx=True):
             return
         async with sem:
@@ -241,4 +248,65 @@ async def notify_cap(session: AsyncSession, redis) -> int:
                                   build_cap_payload(r), source="CAP", ref=r["identifier"], event_type=r["event_type"]))
     sent = await deliver(session, redis, batch) if batch else 0
     log.info("CAP alerts: %d matched, %d sent", len(rows), sent)
+    return sent
+
+
+# ------------------------------------------------------------------ lightning (EUMETSAT MTG LI)
+LIGHTNING_SQL = text("""
+SELECT u.id AS user_id, u.endpoint, u.p256dh, u.auth, u.quiet_hours_start, u.quiet_hours_end, u.timezone,
+       count(*) AS n,
+       min(ST_Distance(u.location::geography, l.geom::geography)) AS dmin_m,
+       avg(ST_Distance(u.location::geography, l.geom::geography))
+         FILTER (WHERE l.flash_time > NOW() - make_interval(mins => CAST(:half AS INT))) AS d_recent,
+       avg(ST_Distance(u.location::geography, l.geom::geography))
+         FILTER (WHERE l.flash_time <= NOW() - make_interval(mins => CAST(:half AS INT))) AS d_older,
+       max(l.flash_time) AS last_flash
+FROM user_subscriptions u
+JOIN lightning_flashes l
+  ON ST_DWithin(l.geom, u.location, 0.5)
+ AND ST_DWithin(l.geom::geography, u.location::geography, :radius_m)
+WHERE 'LIGHTNING' = ANY(u.alert_types)
+  AND l.flash_time > NOW() - make_interval(mins => CAST(:window AS INT))
+  AND NOT EXISTS (SELECT 1 FROM alert_history ah
+                  WHERE ah.subscription_id = u.id AND ah.event_type = 'LIGHTNING'
+                    AND ah.sent_at > NOW() - make_interval(mins => CAST(:dedup AS INT)))
+GROUP BY u.id
+HAVING count(*) >= :min_n
+""")
+
+
+def build_lightning_payload(row) -> dict:
+    km = row["dmin_m"] / 1000.0
+    trend = ""
+    if row["d_recent"] is not None and row["d_older"] is not None:
+        if row["d_recent"] < row["d_older"] - 2000:
+            trend = ", in avvicinamento"
+        elif row["d_recent"] > row["d_older"] + 2000:
+            trend = ", in allontanamento"
+    spec = LIGHTNING_EVENTS["LIGHTNING"]
+    return {
+        "title": f"{spec['title']} (~{km:.0f} km)",
+        "body": (f"{row['n']} fulmini negli ultimi {settings.lightning_window_min} min, il più vicino a "
+                 f"{km:.0f} km{trend}. Evita luoghi aperti e ripari esposti."),
+        "icon": "/icons/storm-alert.png", "badge": "/icons/badge.png", "tag": "nowcast-LIGHTNING",
+        "renotify": True, "data": {"url": f"{settings.frontend_url}/?focus=alert", "event": "LIGHTNING"},
+    }
+
+
+async def notify_lightning(session: AsyncSession, redis) -> int:
+    rows = (await session.execute(LIGHTNING_SQL, {
+        "radius_m": settings.lightning_radius_km * 1000, "window": settings.lightning_window_min,
+        "half": settings.lightning_window_min // 2, "dedup": LIGHTNING_EVENTS["LIGHTNING"]["dedup_min"],
+        "min_n": settings.lightning_min_flashes,
+    })).mappings().all()
+    batch = []
+    for r in rows:
+        sev = LIGHTNING_EVENTS["LIGHTNING"]["severity"]
+        if not should_send(sev, in_quiet_hours(r["quiet_hours_start"], r["quiet_hours_end"], r["timezone"])):
+            continue
+        batch.append(Notification(r["user_id"], r["endpoint"], r["p256dh"], r["auth"], sev,
+                                  build_lightning_payload(r), source="LIGHT", event_type="LIGHTNING"))
+    sent = await deliver(session, redis, batch) if batch else 0
+    if rows:
+        log.info("Lightning alerts: %d matched, %d sent", len(rows), sent)
     return sent

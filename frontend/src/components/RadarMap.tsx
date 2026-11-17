@@ -105,13 +105,14 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
       center: [12.5, 42.0],
       zoom: 5.2,
       maxZoom: 12,
-      attributionControl: { compact: true, customAttribution: "Radar © DPC / RainViewer · © OpenFreeMap © OpenStreetMap" },
+      attributionControl: { compact: true, customAttribution: "Radar © DPC / RainViewer · Fulmini © EUMETSAT · © OpenFreeMap © OpenStreetMap" },
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     // start with the (compact) attribution collapsed
     m.once("load", () => el.querySelector(".maplibregl-ctrl-attrib")?.classList.remove("maplibregl-compact-show"));
     m.on("load", () => {
       m.addSource("risk", { type: "geojson", data: EMPTY_FC });
+      m.addSource("lightning", { type: "geojson", data: EMPTY_FC });
       m.addSource("cap", { type: "geojson", data: EMPTY_FC });
       m.addLayer({
         id: "cap-fill",
@@ -131,6 +132,19 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
       ] as unknown as maplibregl.ExpressionSpecification;
       m.addLayer({ id: "risk-fill", type: "fill", source: "risk", paint: { "fill-color": sevColor, "fill-opacity": 0.12 } });
       m.addLayer({ id: "risk-line", type: "line", source: "risk", paint: { "line-color": sevColor, "line-width": 1.8 } });
+      // lightning: bright when fresh, fading out over 60 min
+      m.addLayer({
+        id: "lightning",
+        type: "circle",
+        source: "lightning",
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, 2, 9, 4, 12, 6],
+          "circle-color": ["interpolate", ["linear"], ["get", "age_min"], 0, "#fef08a", 15, "#facc15", 40, "#f97316"],
+          "circle-opacity": ["interpolate", ["linear"], ["get", "age_min"], 0, 1, 30, 0.6, 60, 0.15],
+          "circle-stroke-color": "#000000",
+          "circle-stroke-width": 0.5,
+        },
+      });
       m.on("click", "risk-fill", (e) => {
         const f = e.features?.[0];
         if (!f) return;
@@ -191,6 +205,12 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
       ]);
       (m.getSource("risk") as GeoJSONSource | undefined)?.setData(risk);
       (m.getSource("cap") as GeoJSONSource | undefined)?.setData(cap);
+      const { assetsUrl: au } = await getRuntimeConfig();
+      const base = au.startsWith("/") ? `${API_URL}${au}` : au;
+      const lt = await fetch(`${base}/lightning.geojson?t=${Math.floor(Date.now() / 60000)}`)
+        .then((x) => (x.ok ? x.json() : EMPTY_FC))
+        .catch(() => EMPTY_FC);
+      (m.getSource("lightning") as GeoJSONSource | undefined)?.setData(lt);
     } catch (e) {
       const msg = (e as Error).message;
       setError(msg === "HTTP 404" ? "Primo ciclo radar in elaborazione, riprova tra qualche minuto" : `Dati radar non disponibili (${msg})`);

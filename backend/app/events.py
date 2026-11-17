@@ -21,6 +21,12 @@ RADAR_EVENTS: dict[str, dict] = {
              "label": "Neve", "title": "❄️ Neve in arrivo"},
 }
 
+# Lightning (EUMETSAT MTG Lightning Imager): observed flashes near the user, last ~20 min
+LIGHTNING_EVENTS: dict[str, dict] = {
+    "LIGHTNING": {"severity": "SEVERE", "dedup_min": 60, "label": "Fulmini vicini",
+                  "title": "⚡ Fulmini vicino a te"},
+}
+
 # Institutional CAP warnings (MeteoAlarm / Protezione Civile), hours to ~2 days ahead.
 CAP_EVENTS: dict[str, dict] = {
     "CAP_THUNDERSTORM": {"label": "Allerta temporali", "match": r"thunderstorm"},
@@ -35,7 +41,7 @@ CAP_EVENTS: dict[str, dict] = {
     "CAP_AVALANCHE": {"label": "Allerta valanghe", "match": r"avalanche"},
 }
 
-ALL_EVENTS = set(RADAR_EVENTS) | set(CAP_EVENTS)
+ALL_EVENTS = set(RADAR_EVENTS) | set(CAP_EVENTS) | set(LIGHTNING_EVENTS)
 DEFAULT_ALERT_TYPES = ["HEAVY_RAIN", "CLOUDBURST", "HAIL", "CAP_THUNDERSTORM", "CAP_RAIN", "CAP_WIND"]
 
 # vectorized threshold (dBZ) -> radar event (rain events; SNOW handled separately via snow mask)

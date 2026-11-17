@@ -14,7 +14,8 @@ backend/   FastAPI + worker pySTEPS (LK + S-PROG) + PostGIS + Redis → VPS (doc
 2. `nowcast_engine.py` – filtro < 15 dBZ, Z-R Marshall-Palmer (a=200, b=1.6), optical flow Lucas-Kanade, **S-PROG** 12×5 min.
 3. `vectorizer.py` – contorni 35/45/55 dBZ, buffer `1.5 + 0.1·lead` km (EPSG:3035), PostGIS `forecast_polygons` (retention 2 h), PNG Web-Mercator dei frame −25…+60 min, `latest.json` + `latest_forecast.geojson` (gzip) su R2.
 4. `notifier.py` – query `ST_Intersects`, priorità al lead time più breve, dedup 45 min con *upgrade* di severità, quiet hours (solo MODERATE silenziati, nel fuso dell'utente), rimozione endpoint 404/410, lock Redis anti-duplicati.
-5. `cap.py` – feed CAP MeteoAlarm Italia ogni 10 min → `cap_alerts` + push una tantum per allerta.
+5. `lightning.py` – fulmini da **EUMETSAT MTG Lightning Imager** (LI-2-LFL, collezione `EO:EUM:DAT:0691`, licenza NoConditions): prodotti ogni 10 min, filtro area Italia, tabella `lightning_flashes` (3 h), `lightning.geojson`, avviso "Fulmini vicini" (≥2 fulmini entro 15 km in 20 min, tendenza avvicinamento) e menzione dei fulmini negli avvisi radar. Richiede secret `EUMETSAT_CONSUMER_KEY` / `EUMETSAT_CONSUMER_SECRET`. Blitzortung non usato: vieta l'accesso da app di terzi senza approvazione.
+6. `cap.py` – feed CAP MeteoAlarm Italia ogni 10 min → `cap_alerts` + push una tantum per allerta.
 
 ## API (`https://api-nowcast.noctalix.com`)
 
@@ -70,6 +71,7 @@ Configurazione (Settings → Secrets and variables → Actions):
 | Secret | `VPS_SSH_KEY` | chiave privata SSH |
 | Secret | `VPS_USER` | `ubuntu` |
 | Secret | `DATABASE_URL` | `postgresql+asyncpg://nowcast.<ref>:<pw>@aws-1-eu-north-1.pooler.supabase.com:5432/postgres?ssl=require` (pooler in *session mode*, porta 5432) |
+| Secret | `EUMETSAT_CONSUMER_KEY`, `EUMETSAT_CONSUMER_SECRET` | fulmini (account gratuito EUMETSAT) |
 | Secret | `CLOUDFLARE_API_TOKEN` (opz.) | *Zone DNS: Edit* → record `api-nowcast` automatico |
 
 Chiavi VAPID: generate al primo avvio e persistite nel volume `nowcast_data` del VPS.

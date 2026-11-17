@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent VPS provisioning + deploy (Ubuntu). Run as root; used by deploy-backend.yml.
-# Env (optional, from CI secrets): DATABASE_URL, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+# Env (optional, from CI secrets): DATABASE_URL, R2_*, EUMETSAT_CONSUMER_KEY/SECRET
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,7 +29,7 @@ fi
 
 touch .env && chmod 600 .env
 setenv() { grep -q "^$1=" .env && sed -i "s#^$1=.*#$1=$2#" .env || echo "$1=$2" >> .env; }
-for k in DATABASE_URL R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+for k in DATABASE_URL R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY EUMETSAT_CONSUMER_KEY EUMETSAT_CONSUMER_SECRET; do
   v="${!k:-}"; [ -n "$v" ] && setenv "$k" "$v"
 done
 grep -q '^DATABASE_URL=.\+' .env || { echo "DATABASE_URL missing (set the GitHub secret)"; exit 1; }

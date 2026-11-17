@@ -72,6 +72,17 @@ CREATE INDEX IF NOT EXISTS idx_forecast_run_event ON forecast_polygons (run_time
 ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS event_type VARCHAR(20) NULL;
 ALTER TABLE cap_alerts ADD COLUMN IF NOT EXISTS event_type VARCHAR(20) NULL;
 
+-- v3: lightning (EUMETSAT MTG LI flashes)
+CREATE TABLE IF NOT EXISTS lightning_flashes (
+    id BIGSERIAL PRIMARY KEY,
+    flash_time TIMESTAMPTZ NOT NULL,
+    radiance FLOAT NULL,
+    geom GEOMETRY(Point, 4326) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lightning_geom ON lightning_flashes USING GIST (geom);
+CREATE INDEX IF NOT EXISTS idx_lightning_time ON lightning_flashes (flash_time);
+ALTER TABLE lightning_flashes ENABLE ROW LEVEL SECURITY;
+
 -- Supabase exposes the public schema through its Data API: RLS with no policies blocks anon/authenticated
 -- roles entirely (the backend connects as table owner and is unaffected). Harmless on plain Postgres.
 ALTER TABLE user_subscriptions ENABLE ROW LEVEL SECURITY;

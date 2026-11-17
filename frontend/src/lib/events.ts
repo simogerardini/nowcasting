@@ -14,6 +14,10 @@ export const RADAR_EVENTS: EventSpec[] = [
   { id: "SNOW", label: "Neve", hint: "Inizio nevicata (dove il radar distingue la neve)", color: "#e0f2fe" },
 ];
 
+export const LIGHTNING_EVENTS: EventSpec[] = [
+  { id: "LIGHTNING", label: "Fulmini vicini", hint: "Almeno 2 fulmini entro 15 km negli ultimi 20 min (satellite MTG)", color: "#fde047" },
+];
+
 export const CAP_EVENTS: EventSpec[] = [
   { id: "CAP_THUNDERSTORM", label: "Temporali", hint: "", color: "#a855f7" },
   { id: "CAP_RAIN", label: "Pioggia / alluvione", hint: "", color: "#a855f7" },
@@ -30,5 +34,5 @@ export const CAP_EVENTS: EventSpec[] = [
 export const DEFAULT_ALERT_TYPES = ["HEAVY_RAIN", "CLOUDBURST", "HAIL", "CAP_THUNDERSTORM", "CAP_RAIN", "CAP_WIND"];
 
 export const EVENT_BY_ID: Record<string, EventSpec> = Object.fromEntries(
-  [...RADAR_EVENTS, ...CAP_EVENTS].map((e) => [e.id, e]),
+  [...RADAR_EVENTS, ...LIGHTNING_EVENTS, ...CAP_EVENTS].map((e) => [e.id, e]),
 );

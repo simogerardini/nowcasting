@@ -44,6 +44,8 @@ jobs:
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EUMETSAT_CONSUMER_KEY: ${{ secrets.EUMETSAT_CONSUMER_KEY }}
+          EUMETSAT_CONSUMER_SECRET: ${{ secrets.EUMETSAT_CONSUMER_SECRET }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -55,7 +57,7 @@ jobs:
             -e "$SSH" ./ "$VPS_USER@$VPS_HOST:/opt/nowcast/"
           # Detached: the (slow) Docker build runs on the VPS without holding an Actions runner.
           $SSH "$VPS_USER@$VPS_HOST" \
-            "sudo env DATABASE_URL='$DATABASE_URL' R2_ACCOUNT_ID='$R2_ACCOUNT_ID' R2_ACCESS_KEY_ID='$R2_ACCESS_KEY_ID' R2_SECRET_ACCESS_KEY='$R2_SECRET_ACCESS_KEY' \
+            "sudo env DATABASE_URL='$DATABASE_URL' EUMETSAT_CONSUMER_KEY='$EUMETSAT_CONSUMER_KEY' EUMETSAT_CONSUMER_SECRET='$EUMETSAT_CONSUMER_SECRET' R2_ACCOUNT_ID='$R2_ACCOUNT_ID' R2_ACCESS_KEY_ID='$R2_ACCESS_KEY_ID' R2_SECRET_ACCESS_KEY='$R2_SECRET_ACCESS_KEY' \
              setsid nohup bash /opt/nowcast/scripts/vps-deploy.sh > /tmp/nowcast-deploy.log 2>&1 < /dev/null &"
           echo "Deploy started on VPS. Log: ssh $VPS_USER@$VPS_HOST tail -f /tmp/nowcast-deploy.log"
 

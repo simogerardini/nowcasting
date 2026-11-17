@@ -151,3 +151,35 @@ def test_dpc_geotiff_sentinels():
             ds.write(arr, 1)
         f = _read_geotiff(mem.read(), datetime(2026, 1, 1, tzinfo=timezone.utc), "DPC")
     assert np.isnan(f.dbz[0, 0]) and np.isneginf(f.dbz[0, 1]) and f.dbz[1, 1] == 40.0
+
+
+def _fake_lfl_zip(points):
+    """Build a zip with an LI-2-LFL-like BODY NetCDF (scaled lat/lon, flash_time since 2000)."""
+    import io
+    import tempfile
+    import zipfile
+    import netCDF4
+    with tempfile.NamedTemporaryFile(suffix=".nc") as tmp:
+        with netCDF4.Dataset(tmp.name, "w") as ds:
+            ds.createDimension("flashes", len(points))
+            la = ds.createVariable("latitude", "i2", ("flashes",)); la.scale_factor = 0.0027
+            lo = ds.createVariable("longitude", "i2", ("flashes",)); lo.scale_factor = 0.0027
+            ft = ds.createVariable("flash_time", "f8", ("flashes",)); ft.units = "seconds since 2000-01-01 00:00:00.0"
+            ra = ds.createVariable("radiance", "f4", ("flashes",))
+            la[:] = [p[0] for p in points]; lo[:] = [p[1] for p in points]
+            ft[:] = [p[2] for p in points]; ra[:] = [1.0] * len(points)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.write(tmp.name, "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--BODY_0001.nc")
+        return buf.getvalue()
+
+
+def test_lightning_lfl_parsing():
+    from worker.lightning import EPOCH_2000, _flashes_from_zip
+    t = (datetime(2026, 11, 17, 15, 0, tzinfo=timezone.utc) - EPOCH_2000).total_seconds()
+    data = _fake_lfl_zip([(44.52, 11.43, t), (51.0, 0.0, t)])  # Granarolo + London (outside bbox)
+    fl = _flashes_from_zip(data)
+    assert len(fl) == 1
+    lat, lon, secs, rad = fl[0]
+    assert abs(lat - 44.52) < 0.01 and abs(lon - 11.43) < 0.01
+    assert abs(secs - datetime(2026, 11, 17, 15, 0, tzinfo=timezone.utc).timestamp()) < 1

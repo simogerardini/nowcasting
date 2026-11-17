@@ -14,7 +14,7 @@ import {
   updatePrefs,
   DEFAULT_PREFS,
 } from "@/lib/pushManager";
-import { CAP_EVENTS, EventSpec, RADAR_EVENTS } from "@/lib/events";
+import { CAP_EVENTS, EventSpec, LIGHTNING_EVENTS, RADAR_EVENTS } from "@/lib/events";
 
 function Checks({
   items, selected, onToggle, cols = 1,
@@ -129,6 +129,12 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
             <legend className="mb-1 font-semibold">Radar · prossimi 60 minuti</legend>
             <p className="mb-2 text-xs text-slate-400">Previsione sulla tua posizione, aggiornata ogni 10 min. Più affidabile entro 30 min.</p>
             <Checks items={RADAR_EVENTS} selected={prefs.alert_types} onToggle={toggleType} />
+          </fieldset>
+
+          <fieldset>
+            <legend className="mb-1 font-semibold">Fulmini · satellite</legend>
+            <p className="mb-2 text-xs text-slate-400">Fulmini osservati dal satellite europeo MTG (EUMETSAT), ritardo 2–12 min.</p>
+            <Checks items={LIGHTNING_EVENTS} selected={prefs.alert_types} onToggle={toggleType} />
           </fieldset>
 
           <fieldset>

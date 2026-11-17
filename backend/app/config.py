@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     dpc_api_base: str = "https://radar-api.protezionecivile.it"
     dpc_origin: str = "https://radar.protezionecivile.it"  # API requires an origin (docs, since 12/01/2026)
     use_poh: bool = True  # DPC Probability Of Hail product for hail alerts
+    # EUMETSAT Data Store (MTG Lightning Imager); empty = lightning disabled
+    eumetsat_consumer_key: str = ""
+    eumetsat_consumer_secret: str = ""
+    lightning_poll_seconds: int = 90
+    lightning_radius_km: float = 15.0
+    lightning_window_min: int = 20
+    lightning_min_flashes: int = 2
     rainviewer_api: str = "https://api.rainviewer.com/public/weather-maps.json"
     cap_feed_url: str = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-italy"
     n_input_frames: int = 6

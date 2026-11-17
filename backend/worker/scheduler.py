@@ -64,6 +64,26 @@ async def radar_tick(redis, storage: Storage, force: bool = False) -> None:
         await redis.delete(LOCK_KEY)
 
 
+async def lightning_tick(redis, storage: Storage) -> None:
+    from app.database import SessionLocal
+
+    from . import lightning, notifier
+    try:
+        flashes = await asyncio.to_thread(lightning.fetch_new_flashes)
+        async with SessionLocal() as session:
+            await lightning.store_flashes(session, flashes)
+            geo = await lightning.lightning_geojson(session)
+            await asyncio.to_thread(storage.put, "lightning.geojson", json.dumps(geo, separators=(",", ":")).encode(),
+                                    "application/geo+json", "public, max-age=60", True)
+            sent = await notifier.notify_lightning(session, redis)
+        lightning.save_status(last_ok=datetime.now(timezone.utc).isoformat(), new_flashes=len(flashes),
+                              flashes_60min=len(geo["features"]), notifications=sent, last_error=None)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Lightning cycle failed")
+        lightning.save_status(last_error=f"{type(exc).__name__}: {exc}"[:400],
+                              last_error_at=datetime.now(timezone.utc).isoformat())
+
+
 async def cap_tick(redis) -> None:
     try:
         await run_cap_cycle(redis)
@@ -85,6 +105,13 @@ async def main(once: bool) -> None:
                   max_instances=1, coalesce=True)
     sched.add_job(cap_tick, "interval", seconds=settings.cap_poll_seconds, args=[redis],
                   max_instances=1, coalesce=True)
+    from . import lightning
+    if lightning.enabled():
+        sched.add_job(lightning_tick, "interval", seconds=settings.lightning_poll_seconds,
+                      args=[redis, storage], max_instances=1, coalesce=True)
+        log.info("Lightning (EUMETSAT MTG LI) enabled")
+    else:
+        lightning.save_status(enabled=False, note="set EUMETSAT_CONSUMER_KEY / EUMETSAT_CONSUMER_SECRET")
     sched.start()
     await cap_tick(redis)
     await radar_tick(redis, storage)

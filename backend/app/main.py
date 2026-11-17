@@ -94,6 +94,12 @@ async def health(session: AsyncSession = Depends(get_session)):
         out["redis"] = f"error: {exc.__class__.__name__}"
         out["status"] = "degraded"
     out["assets_url"] = settings.assets_base_url
+    lstatus = Path(settings.radar_cache_dir).parent / "lightning_status.json"
+    if lstatus.exists():
+        try:
+            out["lightning"] = json.loads(lstatus.read_text())
+        except ValueError:
+            pass
     status_file = Path(settings.radar_cache_dir).parent / "worker_status.json"
     if status_file.exists():
         try:
