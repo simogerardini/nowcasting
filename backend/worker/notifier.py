@@ -64,7 +64,21 @@ SELECT DISTINCT ON (u.id)
     (SELECT count(*) FROM lightning_flashes l
       WHERE l.flash_time > NOW() - INTERVAL '15 minutes'
         AND ST_DWithin(l.geom, u.location, 0.4)
-        AND ST_DWithin(l.geom::geography, u.location::geography, 30000)) AS flashes_near
+        AND ST_DWithin(l.geom::geography, u.location::geography, 30000)) AS flashes_near,
+    -- official warning at the user's point for the same hazard: quoted as corroboration only
+    (SELECT c.severity || '|' || COALESCE(c.event_type, '') || '|' || COALESCE(c.provider, 'MeteoAlarm')
+       FROM cap_alerts c
+      WHERE ST_Intersects(u.location, c.geom) AND (c.expires IS NULL OR c.expires > NOW())
+        AND (c.onset IS NULL OR c.onset <= NOW() + INTERVAL '1 hour')
+        AND c.severity IN ('Moderate', 'Severe', 'Extreme')
+        AND c.event_type = ANY(CASE cand.event_type
+              WHEN 'HAIL' THEN ARRAY['CAP_THUNDERSTORM']
+              WHEN 'CLOUDBURST' THEN ARRAY['CAP_THUNDERSTORM', 'CAP_RAIN']
+              WHEN 'HEAVY_RAIN' THEN ARRAY['CAP_RAIN', 'CAP_THUNDERSTORM']
+              WHEN 'SNOW' THEN ARRAY['CAP_SNOW_ICE']
+              ELSE ARRAY[]::text[] END)
+      ORDER BY (CASE c.severity WHEN 'Extreme' THEN 3 WHEN 'Severe' THEN 2 ELSE 1 END) DESC
+      LIMIT 1) AS cap_context
 FROM cand
 JOIN user_subscriptions u ON u.id = cand.subscription_id
 JOIN t ON t.event_type = cand.event_type
@@ -167,6 +181,11 @@ def build_radar_payload(row, run_time: datetime) -> dict:
     body = f"{what} sulla tua posizione verso le {eta:%H:%M}. Probabilità {pct}%."
     if row.get("flashes_near") and ev in ("HEAVY_RAIN", "CLOUDBURST", "HAIL"):
         body += f" ⚡ Attività elettrica in zona ({row['flashes_near']} fulmini entro 30 km)."
+    if row.get("cap_context"):
+        cap_sev, cap_ev, provider = (row["cap_context"].split("|") + ["", ""])[:3]
+        colour = {"Moderate": "gialla", "Severe": "arancione", "Extreme": "rossa"}.get(cap_sev, "gialla")
+        what = CAP_EVENTS.get(cap_ev, {}).get("label", "Allerta meteo").removeprefix("Allerta ").strip()
+        body += f" 📢 Coerente con l'allerta {colour} {what} ({provider})."
     body += " Tocca per aprire il radar."
     data["prob"] = round(float(row["prob"]), 3)
     return {
@@ -276,6 +295,14 @@ async def notify_radar(session: AsyncSession, redis, run_time: datetime, sub_ids
 
 
 async def notify_cap(session: AsyncSession, redis) -> int:
+    """Standalone pushes for official warnings are OFF by default (CAP_PUSH=false): only events detected or
+    forecast by our own radar model at the user's point are notified; warnings are quoted inside them."""
+    if not settings.cap_push:
+        return 0
+    return await _notify_cap(session, redis)
+
+
+async def _notify_cap(session: AsyncSession, redis) -> int:
     rows = (await session.execute(CAP_MATCH_SQL)).mappings().all()
     batch = []
     for r in rows:

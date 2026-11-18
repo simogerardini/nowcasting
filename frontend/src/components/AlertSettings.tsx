@@ -15,7 +15,7 @@ import {
   DEFAULT_PREFS,
 } from "@/lib/pushManager";
 import { API_URL } from "@/lib/config";
-import { CAP_EVENTS, EVENT_BY_ID, EventSpec, LIGHTNING_EVENTS, RADAR_EVENTS } from "@/lib/events";
+import { EVENT_BY_ID, EventSpec, LIGHTNING_EVENTS, RADAR_EVENTS } from "@/lib/events";
 
 function Checks({
   items, selected, onToggle, cols = 1,
@@ -180,9 +180,12 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
           </fieldset>
 
           <fieldset>
-            <legend className="mb-1 font-semibold">Allerte ufficiali · fino a 1–2 giorni</legend>
-            <p className="mb-2 text-xs text-slate-400">Allerte gialle, arancioni e rosse per la tua zona: MeteoAlarm in 38 paesi europei (in Italia Protezione Civile), National Weather Service negli Stati Uniti.</p>
-            <Checks items={CAP_EVENTS} selected={prefs.alert_types} onToggle={toggleType} cols={2} />
+            <legend className="mb-1 font-semibold">Allerte ufficiali</legend>
+            <p className="text-xs text-slate-400">
+              Nessuna notifica dalle sole allerte ufficiali (MeteoAlarm, Protezione Civile, NWS): non sono verificabili dal
+              nostro modello sul tuo punto. Le vedi nell&apos;indicatore in alto e vengono citate negli avvisi radar quando il
+              nostro modello conferma l&apos;evento (temporale, pioggia forte, neve).
+            </p>
           </fieldset>
 
           <fieldset className="space-y-2">

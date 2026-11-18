@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     europe_map: bool = True            # publish the OPERA Europe observed composite for the map
     meteoalarm_api: str = "https://feeds.meteoalarm.org/api/v1/warnings/feeds-{slug}"
     nws_enabled: bool = True
+    cap_push: bool = False             # standalone pushes for official warnings (off: not validated by our model)
     glm_enabled: bool = True
     n_input_frames: int = 6
     radar_downsample: int = 2      # block-average factor (1 = native ~1 km); 2 keeps small VPSs fast
