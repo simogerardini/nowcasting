@@ -29,6 +29,8 @@ log = logging.getLogger("scheduler")
 settings = get_settings()
 
 LOCK_KEY = "nowcast:lock"
+CPU_LOCK = asyncio.Lock()          # radar cycles (Italy + regional) never overlap
+STATE = {"it_waiting": False}
 STATUS_FILE = Path(settings.radar_cache_dir).parent / "worker_status.json"
 
 
@@ -46,13 +48,20 @@ async def radar_tick(redis, storage: Storage, force: bool = False) -> None:
     last = await redis.get("nowcast:last_run")
     if not force and latest is not None and last == latest.isoformat():
         return
-    # Distributed lock: never overlap cycles (TTL covers a hung run)
-    if not await redis.set(LOCK_KEY, "1", ex=240, nx=True):
-        log.info("Previous cycle still running - skip")
+    # One radar cycle at a time (small VPS). The Italy cycle has priority: it WAITS for a running regional
+    # cycle (instead of skipping, which starved it when both ticks fired together) and regional ticks
+    # skip while it is waiting.
+    STATE["it_waiting"] = True
+    try:
+        await asyncio.wait_for(CPU_LOCK.acquire(), timeout=280)
+    except asyncio.TimeoutError:
+        log.warning("Radar lock busy for 280 s - skip")
         return
+    finally:
+        STATE["it_waiting"] = False
     write_status(last_attempt=datetime.now(timezone.utc).isoformat())
     try:
-        run = await run_cycle(redis, storage)
+        run = await asyncio.wait_for(run_cycle(redis, storage), timeout=600)
         from . import ingest_dpc
         write_status(last_ok=datetime.now(timezone.utc).isoformat(), last_run=run, last_error=None,
                      dpc_error=ingest_dpc.LAST_DPC_ERROR)
@@ -61,7 +70,7 @@ async def radar_tick(redis, storage: Storage, force: bool = False) -> None:
         write_status(last_error=f"{type(exc).__name__}: {exc}"[:500],
                      last_error_at=datetime.now(timezone.utc).isoformat())
     finally:
-        await redis.delete(LOCK_KEY)
+        CPU_LOCK.release()
 
 
 async def lightning_tick(redis, storage: Storage) -> None:
@@ -96,11 +105,12 @@ async def lightning_tick(redis, storage: Storage) -> None:
 async def regional_tick(redis, storage: Storage) -> None:
     """Europe map layer + regional nowcasts (Europe: OPERA, world: RainViewer). Shares the radar lock:
     never runs concurrently with the Italy cycle (small VPS)."""
-    if not await redis.set(LOCK_KEY, "1", ex=300, nx=True):
+    if STATE["it_waiting"] or CPU_LOCK.locked():
         return
+    await CPU_LOCK.acquire()
     try:
         from . import ingest_regional, pipeline
-        n = await run_regional(redis, storage)
+        n = await asyncio.wait_for(run_regional(redis, storage), timeout=600)
         write_status(regions=sorted(pipeline.REGIONS["domains"]), regions_computed=n,
                      europe_frames=len((pipeline.REGIONS["europe"] or {}).get("frames", [])),
                      opera_error=ingest_regional.LAST_OPERA_ERROR, regional_error=None)
@@ -108,7 +118,7 @@ async def regional_tick(redis, storage: Storage) -> None:
         log.exception("Regional cycle failed")
         write_status(regional_error=f"{type(exc).__name__}: {exc}"[:400])
     finally:
-        await redis.delete(LOCK_KEY)
+        CPU_LOCK.release()
 
 
 async def cap_tick(redis) -> None:

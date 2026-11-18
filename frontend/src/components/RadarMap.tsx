@@ -419,6 +419,15 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
     }
   }, [ready, position, focus]);
 
+  // radar older than 25 min: say so instead of animating stale data as if it were current
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const staleMin = manifest ? Math.round((now - Date.parse(manifest.run_timestamp)) / 60_000) : 0;
+  const stale = staleMin > 25;
+
   const label = useMemo(() => {
     if (!frame) return "—";
     const sign = frame.offset_min > 0 ? "+" : "";
@@ -428,6 +437,11 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
   return (
     <div className="relative h-full w-full">
       <div ref={container} className="h-full w-full" />
+      {!error && stale && manifest && (
+        <div className="absolute inset-x-2 bottom-24 z-10 mx-auto max-w-md rounded-lg bg-amber-900/90 px-3 py-2 text-center text-sm">
+          Radar non aggiornato: ultimo dato delle {fmtTime(manifest.run_timestamp)} ({staleMin >= 120 ? `${Math.round(staleMin / 60)} ore fa` : `${staleMin} min fa`})
+        </div>
+      )}
       {error && (
         <div className="absolute inset-x-2 bottom-20 z-10 mx-auto max-w-md rounded-lg bg-red-900/90 px-3 py-2 text-center text-sm">
           {error}

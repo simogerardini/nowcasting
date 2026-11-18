@@ -83,6 +83,12 @@ async def health(session: AsyncSession = Depends(get_session)):
             "SELECT run_timestamp, source, frames, polygons, notifications, duration_s, finished_at "
             "FROM pipeline_runs WHERE domain = 'IT' ORDER BY run_timestamp DESC LIMIT 1"))).mappings().first()
         out["last_run"] = dict(row) if row else None
+        if row:
+            from datetime import datetime, timezone
+            age = (datetime.now(timezone.utc) - row["run_timestamp"]).total_seconds() / 60
+            out["radar_age_min"] = round(age, 1)
+            if age > 30:
+                out["status"] = "degraded"
         regions = (await session.execute(text(
             "SELECT DISTINCT ON (domain) domain, run_timestamp, source, polygons, notifications, duration_s "
             "FROM pipeline_runs WHERE domain <> 'IT' AND run_timestamp > NOW() - INTERVAL '2 hours' "
