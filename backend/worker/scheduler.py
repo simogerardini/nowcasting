@@ -95,7 +95,8 @@ async def lightning_tick(redis, storage: Storage) -> None:
                               last_product=lightning.STATS["last_product"],
                               flashes_60min=len(geo["features"]), notifications=sent, last_error=None,
                               glm_files=lightning.STATS.get("glm_files", 0),
-                              mtg_enabled=lightning.enabled(), regions=len(lightning.EXTRA_BBOXES))
+                              mtg_enabled=lightning.enabled(), regions=len(lightning.EXTRA_BBOXES),
+                              download_errors=lightning.STATS.get("last_download_errors"))
     except Exception as exc:  # noqa: BLE001
         log.exception("Lightning cycle failed")
         lightning.save_status(last_error=f"{type(exc).__name__}: {exc}"[:400],

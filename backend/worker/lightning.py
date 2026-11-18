@@ -36,6 +36,7 @@ EPOCH_2000 = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 _token: tuple[str, float] | None = None
 _seen: dict[str, float] = {}  # product id -> processed at (monotonic)
+_failures: dict[str, int] = {}  # product id -> failed download attempts
 LAST_STATUS: dict = {}
 STATS = {"products": 0, "flashes_full_disc": 0, "last_product": None}
 
@@ -134,10 +135,18 @@ def fetch_new_flashes(lookback_min: int = 40) -> list[tuple[float, float, float,
         if not todo:
             return []
         tok = _get_token(c)
-        for p in todo:
-            r = c.get(p["href"], headers={"Authorization": f"Bearer {tok}"})
-            r.raise_for_status()
-            fl = _flashes_from_zip(r.content)
+        errors = []
+        for p in sorted(todo, key=lambda x: x["date"], reverse=True):  # newest first
+            try:
+                r = c.get(p["href"], headers={"Authorization": f"Bearer {tok}"}, timeout=httpx.Timeout(20, read=30))
+                r.raise_for_status()
+                fl = _flashes_from_zip(r.content)
+            except Exception as exc:  # noqa: BLE001 - one bad/slow product must not block the others
+                _failures[p["id"]] = _failures.get(p["id"], 0) + 1
+                if _failures[p["id"]] >= 3:
+                    _seen[p["id"]] = time.monotonic()  # give up on this product
+                errors.append(f"{p['date']}: {type(exc).__name__}")
+                continue
             flashes.extend(fl)
             _seen[p["id"]] = time.monotonic()
             STATS["products"] += 1
@@ -145,6 +154,12 @@ def fetch_new_flashes(lookback_min: int = 40) -> list[tuple[float, float, float,
             log.info("LI product %s: %d flashes over Europe / active regions", p["date"], len(fl))
     for k in [k for k, v in _seen.items() if v < time.monotonic() - 6 * 3600]:
         del _seen[k]
+        _failures.pop(k, None)
+    if errors:
+        STATS["last_download_errors"] = errors[:5]
+        log.warning("LI downloads failed: %s", errors)
+        if len(errors) == len(todo):
+            raise RuntimeError(f"all {len(errors)} LI downloads failed: {errors[0]}")
     return flashes
 
 
