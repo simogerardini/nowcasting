@@ -20,7 +20,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import SessionLocal
 
-from . import cap, notifier, points
+from . import cap, notifier, online_calibration, points
 from .ingest_dpc import ITALY_BBOX, fetch_latest_frames
 from .nowcast_engine import run_nowcast
 from .probability import event_probabilities
@@ -58,7 +58,13 @@ async def _finish(session, redis, domain: str, run_time: datetime, result, probs
                   t0: float, sub_ids=None) -> tuple[int, list]:
     stored = await points.store_point_data(session, result, probs, sub_ids=sub_ids)
     await points.verify_alerts(session, run_time)
-    sent = await notifier.notify_radar(session, redis, run_time, sub_ids=stored)
+    # continuous forecast-vs-observation verification of the push model (whole grid)
+    try:
+        await asyncio.to_thread(online_calibration.update, domain, result, probs)
+        await online_calibration.flush(session)
+    except Exception as exc:  # noqa: BLE001 - statistics must never block alerts
+        log.warning("online calibration update failed: %s", exc)
+    sent = await notifier.notify_radar(session, redis, run_time, sub_ids=stored, source=result.source)
     duration = time.perf_counter() - t0
     await session.execute(text("""
         INSERT INTO pipeline_runs (run_timestamp, domain, source, frames, polygons, notifications, duration_s)

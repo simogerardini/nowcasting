@@ -42,15 +42,22 @@ function Checks({
 }
 
 interface VerifRow { event_type: string; alerts: number; hits: number; false_alarms: number; precision: number | null }
+interface ThrRow { source: string; event_type: string; lead_time_minutes: number; p: number | null; precision: number | null; n: number; status: string }
 
 function Reliability() {
   const [rows, setRows] = useState<VerifRow[] | null>(null);
+  const [thr, setThr] = useState<ThrRow[]>([]);
   useEffect(() => {
     fetch(`${API_URL}/api/v1/verification?days=30`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setRows(d?.alerts ?? []))
+      .then((d) => {
+        setRows(d?.alerts ?? []);
+        setThr(d?.push_thresholds ?? []);
+      })
       .catch(() => setRows([]));
   }, []);
+  // continuous calibration (Italy, 15-min lead): measured precision of the alerts the model would send
+  const cal = thr.filter((t) => t.source === "DPC" && t.lead_time_minutes === 15 && t.status !== "insufficient_data");
   if (!rows) return null;
   return (
     <fieldset>
@@ -73,6 +80,23 @@ function Reliability() {
         </table>
       )}
       <p className="mt-1 text-xs text-slate-500">Ogni avviso viene confrontato con il radar osservato sulla tua posizione.</p>
+      {cal.length > 0 && (
+        <table className="mt-2 w-full text-xs">
+          <tbody>
+            {cal.map((t) => (
+              <tr key={t.event_type}>
+                <td className="py-0.5">{EVENT_BY_ID[t.event_type]?.label ?? t.event_type}</td>
+                <td className="text-right text-slate-300">
+                  {t.status === "ok" ? `soglia ${Math.round((t.p ?? 0) * 100)}% · ${Math.round((t.precision ?? 0) * 100)}% confermati` : "sospeso (precisione < 90%)"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p className="mt-1 text-xs text-slate-500">
+        Taratura continua: ogni 5 min le previsioni a 5–15 min sono confrontate con il radar osservato su tutta Italia; le soglie si aggiornano ogni ora (ultimi 30 giorni).
+      </p>
     </fieldset>
   );
 }
@@ -168,8 +192,8 @@ export default function AlertSettings({ onPosition }: { onPosition: (c: Coords) 
           </button>
 
           <fieldset>
-            <legend className="mb-1 font-semibold">Radar · prossimi 60 minuti</legend>
-            <p className="mb-2 text-xs text-slate-400">Previsione sulla tua posizione, aggiornata ogni 5–10 min. Più affidabile entro 30 min. Italia: radar Protezione Civile · Europa: radar OPERA · resto del mondo: RainViewer.</p>
+            <legend className="mb-1 font-semibold">Radar · evento in arrivo entro 15 minuti</legend>
+            <p className="mb-2 text-xs text-slate-400">Avviso solo quando l&apos;evento sta per iniziare sulla tua posizione tra 5 e 15 minuti ed è molto probabile (probabilità calibrata ≥ 70%, soglia ritarata ogni ora per avere almeno il 90% di avvisi confermati). Italia: radar Protezione Civile · Europa: OPERA · resto del mondo: RainViewer.</p>
             <Checks items={RADAR_EVENTS} selected={prefs.alert_types} onToggle={toggleType} />
           </fieldset>
 

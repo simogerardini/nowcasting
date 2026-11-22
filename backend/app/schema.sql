@@ -147,3 +147,28 @@ CREATE TABLE IF NOT EXISTS coverage_demand (
     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE coverage_demand ENABLE ROW LEVEL SECURITY;
+
+-- v6: continuous verification / calibration of push thresholds (forecast vs observation, whole grid)
+CREATE TABLE IF NOT EXISTS calib_stats (
+    day DATE NOT NULL,
+    source VARCHAR(8) NOT NULL,
+    event_type VARCHAR(20) NOT NULL,
+    lead_time_minutes INT NOT NULL,
+    bin INT NOT NULL,
+    n BIGINT NOT NULL DEFAULT 0,
+    hits BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, source, event_type, lead_time_minutes, bin)
+);
+ALTER TABLE calib_stats ENABLE ROW LEVEL SECURITY;
+CREATE TABLE IF NOT EXISTS alert_thresholds (
+    source VARCHAR(8) NOT NULL,
+    event_type VARCHAR(20) NOT NULL,
+    lead_time_minutes INT NOT NULL,
+    p REAL NULL,
+    precision REAL NULL,
+    n BIGINT NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (source, event_type, lead_time_minutes)
+);
+ALTER TABLE alert_thresholds ENABLE ROW LEVEL SECURITY;

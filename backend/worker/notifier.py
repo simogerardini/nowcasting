@@ -24,25 +24,31 @@ settings = get_settings()
 CAP_SEVERITY_LEVEL = {"Minor": "MODERATE", "Moderate": "MODERATE", "Severe": "SEVERE", "Extreme": "EXTREME"}
 RANK = sql_rank("f.severity_level")
 
-def _thresholds_sql() -> str:
-    """VALUES table of per-event alert rules (calibrated probability threshold, max lead, severity)."""
-    from .probability import alert_threshold
-    rows = []
+def _thresholds_sql(source: str | None = None) -> str:
+    """VALUES tables: per-event rules (severity, dedup, dBZ threshold) and per-event/lead push thresholds
+    (continuously re-fitted against observations, see online_calibration)."""
+    from .online_calibration import ALERT_LEADS, threshold
+    rows, thr = [], []
     for ev, spec in RADAR_EVENTS.items():
         rank = SEVERITY_RANK[spec["severity"]]
-        rows.append(f"('{ev}', {alert_threshold(ev):.3f}, {int(spec['max_lead'])}, {rank}, '{spec['severity']}', "
-                    f"{int(spec['dedup_min'])})")
-    return "(VALUES " + ", ".join(rows) + ") AS t(event_type, p, max_lead, rnk, severity, dedup_min)"
+        rows.append(f"('{ev}', {rank}, '{spec['severity']}', {int(spec['dedup_min'])}, {float(spec['dbz'])})")
+        for lead in ALERT_LEADS:
+            if lead <= spec["max_lead"]:
+                thr.append(f"('{ev}', {lead}, {threshold(source, ev, lead):.3f})")
+    return ("t AS (SELECT * FROM (VALUES " + ", ".join(rows) + ") AS v(event_type, rnk, severity, dedup_min, dbz)), "
+            "thr AS (SELECT * FROM (VALUES " + ", ".join(thr) + ") AS w(event_type, lead, p))")
 
 
-def match_sql():
-    """Point-based, probabilistic matching (replaces polygon intersection):
-    - forecast alert: calibrated P(event at the user's pixel) >= event threshold at some lead <= max lead
-    - rain/snow onset: forecast only if dry at the user now; observed onset if wet now and dry in the previous run
+def match_sql(source: str | None = None):
+    """Point-based, probabilistic matching:
+    - forecast alert: the event is about to START at the user's point within 15 min (not occurring now) and its
+      calibrated probability reaches the push threshold for that lead (>= 0.7, re-fitted online for >= 90%
+      confirmed alerts)
+    - observed rain/snow onset: wet now and dry in the previous run
     - one notification per user per run (most severe, then most imminent, then most probable)
     - dedup: same event within its window, and never an equal/less severe radar alert within 45 min."""
     return text(f"""
-WITH t AS (SELECT * FROM {_thresholds_sql()}),
+WITH {_thresholds_sql(source)},
 cur AS (SELECT * FROM point_obs WHERE run_timestamp = :current_run AND subscription_id = ANY(:ids)),
 prev AS (SELECT DISTINCT ON (subscription_id) * FROM point_obs
          WHERE run_timestamp < :current_run AND run_timestamp >= CAST(:current_run AS TIMESTAMPTZ) - INTERVAL '25 minutes'
@@ -50,9 +56,8 @@ prev AS (SELECT DISTINCT ON (subscription_id) * FROM point_obs
          ORDER BY subscription_id, run_timestamp DESC),
 cand AS (
     SELECT pf.subscription_id, pf.event_type, pf.lead_time_minutes, pf.prob, pf.dbz
-    FROM point_forecasts pf JOIN t ON t.event_type = pf.event_type
-    WHERE pf.run_timestamp = :current_run AND pf.subscription_id = ANY(:ids)
-      AND pf.lead_time_minutes BETWEEN 5 AND t.max_lead AND pf.prob >= t.p
+    FROM point_forecasts pf JOIN thr ON thr.event_type = pf.event_type AND thr.lead = pf.lead_time_minutes
+    WHERE pf.run_timestamp = :current_run AND pf.subscription_id = ANY(:ids) AND pf.prob >= thr.p
     UNION ALL
     SELECT c.subscription_id, CASE WHEN c.snow THEN 'SNOW' ELSE 'RAIN_START' END, 0, 1.0, c.dbz
     FROM cur c JOIN prev p ON p.subscription_id = c.subscription_id
@@ -84,7 +89,7 @@ JOIN user_subscriptions u ON u.id = cand.subscription_id
 JOIN t ON t.event_type = cand.event_type
 LEFT JOIN cur ON cur.subscription_id = u.id
 WHERE cand.event_type = ANY(u.alert_types)
-  AND (cand.event_type NOT IN ('RAIN_START', 'SNOW') OR cand.lead_time_minutes = 0 OR COALESCE(cur.dbz, -99) < 15)
+  AND (cand.lead_time_minutes = 0 OR COALESCE(cur.dbz, -99) < t.dbz)   -- onset only: not already occurring
   AND NOT EXISTS (
       SELECT 1 FROM alert_history ah
       WHERE ah.subscription_id = u.id AND ah.source = 'RADAR'
@@ -270,14 +275,15 @@ async def deliver(session: AsyncSession, redis, batch: list[Notification]) -> in
     return sent
 
 
-async def notify_radar(session: AsyncSession, redis, run_time: datetime, sub_ids: list | None = None) -> int:
+async def notify_radar(session: AsyncSession, redis, run_time: datetime, sub_ids: list | None = None,
+                       source: str | None = None) -> int:
     """Alerts for the subscribers of one domain run (sub_ids = those whose point data this run stored)."""
     if sub_ids is None:
         sub_ids = (await session.execute(text("SELECT subscription_id FROM point_obs WHERE run_timestamp = :r"),
                                          {"r": run_time})).scalars().all()
     if not sub_ids:
         return 0
-    rows = (await session.execute(match_sql(), {"current_run": run_time, "ids": list(sub_ids),
+    rows = (await session.execute(match_sql(source), {"current_run": run_time, "ids": list(sub_ids),
                                                 "dedup": settings.dedup_minutes})).mappings().all()
     batch = []
     for r in rows:

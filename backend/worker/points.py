@@ -133,4 +133,7 @@ async def verification_stats(session: AsyncSession, days: int = 30) -> dict:
         a["precision"] = round(a["hits"] / done, 3) if done else None
     rel = [{k: (round(float(v), 4) if isinstance(v, float) else v) for k, v in dict(r).items()}
            for r in (await session.execute(RELIABILITY_SQL, {"days": days})).mappings().all()]
-    return {"days": days, "alerts": alerts, "point_reliability": rel}
+    thr = [dict(r) for r in (await session.execute(text(
+        "SELECT source, event_type, lead_time_minutes, p, precision, n, status, updated_at FROM alert_thresholds "
+        "ORDER BY source, event_type, lead_time_minutes"))).mappings().all()]
+    return {"days": days, "alerts": alerts, "point_reliability": rel, "push_thresholds": thr}

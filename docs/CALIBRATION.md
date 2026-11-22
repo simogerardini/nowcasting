@@ -22,3 +22,9 @@ Affidabilita' delle probabilita' (validazione, media prevista vs frequenza osser
 **CLOUDBURST**: P>=0.2: 78%/14% · P>=0.3: 86%/10% · P>=0.4: 92%/7% · P>=0.5: 95%/5% · P>=0.6: 98%/4% · P>=0.7: 99%/2% · P>=0.8: 100%/1%
 
 Ricalibrazione: `cd backend && python -m scripts.backtest_calibrate --train <giorni> --valid <giorni>`; in produzione l'affidabilita' reale e' in `GET /api/v1/verification`.
+
+## Taratura continua in produzione (`worker/online_calibration.py`)
+
+- Le notifiche radar partono solo per un evento che **sta per iniziare** sul punto dell'utente (non già in corso) entro **5–15 minuti**, con probabilità calibrata ≥ **0,7**.
+- A ogni ciclo (5 min) le probabilità emesse 5, 10 e 15 minuti prima vengono confrontate con il radar osservato **su tutta la griglia** (sotto-campionata ogni 3 pixel), contando solo i punti dove l'evento non era in corso all'emissione (= stesso criterio degli avvisi), successo = evento osservato entro ~3 km. I conteggi per fonte radar (DPC / OPERA / altre), evento, anticipo e classe di probabilità vanno in `calib_stats`.
+- Ogni ora, sugli ultimi 30 giorni, per ogni fonte/evento/anticipo viene scelta la soglia più bassa ≥ 0,7 con almeno il **90% di avvisi confermati** (minimo 200 casi sopra soglia); se nessuna soglia raggiunge il 90% gli avvisi di quel tipo e anticipo vengono **sospesi**; senza dati sufficienti vale la soglia statica (≥ 0,7). Risultato in `alert_thresholds` e in `GET /api/v1/verification` (`push_thresholds`).

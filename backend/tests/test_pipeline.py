@@ -249,3 +249,40 @@ def test_meteoalarm_and_nws_parsing():
         "severity": "Severe", "expires": exp, "affectedZones": ["https://api.weather.gov/zones/forecast/TXZ119"]}}]}
     n = parse_nws(nws)
     assert n[0]["event_type"] == "CAP_THUNDERSTORM" and n[0]["codes"] == ["NWS:TXZ119"] and n[0]["country"] == "US"
+
+
+def test_online_threshold_fit():
+    from worker.online_calibration import NBINS, fit_threshold
+    n = np.zeros(NBINS, int); h = np.zeros(NBINS, int)
+    # p 0.70-0.80: 300 alerts, 60% confirmed; 0.80-0.90: 300, 95%; >= 0.90: 300, 99%
+    for b, prec in ((14, .6), (15, .6), (16, .95), (17, .95), (18, .99), (19, .99)):
+        n[b] = 150; h[b] = int(150 * prec)
+    f = fit_threshold(n, h)
+    assert f["status"] == "ok" and f["p"] == 0.8 and f["precision"] >= 0.9   # from 0.7: 84%, 0.75: 89%
+    assert fit_threshold(n // 10, h // 10)["status"] == "insufficient_data"
+    bad = fit_threshold(n, (n * 0.5).astype(int))
+    assert bad["status"] == "disabled" and bad["p"] > 1
+
+
+def test_online_verification_counts_onsets_only():
+    from datetime import timedelta
+    from worker import online_calibration as oc
+    from worker.nowcast_engine import NowcastResult
+    oc._HISTORY.clear(); oc._PENDING.clear()
+    t0 = datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc)
+    shape = (30, 30)
+    leads = [5 * (i + 1) for i in range(12)]
+
+    def res(t, obs):
+        return NowcastResult(t, [], np.zeros((12,) + shape, "float32"), leads, None, None, "DPC", 0.0,
+                             observed_dbz=obs)
+    dry = np.full(shape, -np.inf, "float32")
+    p = np.zeros((12,) + shape, "float32")
+    p[:, :, :15] = 0.9                        # left half: rain forecast with P 0.9
+    oc.update("IT", res(t0, dry), {"RAIN_START": p})
+    wet = dry.copy(); wet[:, :10] = 30.0      # 10 minutes later: rain over 2/3 of the forecast area
+    oc.update("IT", res(t0 + timedelta(minutes=10), wet), {"RAIN_START": np.zeros_like(p)})
+    acc = oc._PENDING[(t0.date(), "DPC", "RAIN_START", 10)]
+    n, hits = acc[0][18], acc[1][18]          # bin 0.90-0.95
+    assert n == 50 and 0.6 < hits / n < 0.9   # 10x5 subsampled points forecast at 0.9; ~2/3 (+3 km halo) observed
+    oc._HISTORY.clear(); oc._PENDING.clear()

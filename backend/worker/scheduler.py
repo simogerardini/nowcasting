@@ -122,6 +122,20 @@ async def regional_tick(redis, storage: Storage) -> None:
         CPU_LOCK.release()
 
 
+async def calib_tick() -> None:
+    """Hourly re-fit of the push thresholds on the accumulated forecast-vs-observation statistics."""
+    from app.database import SessionLocal
+
+    from . import online_calibration
+    try:
+        async with SessionLocal() as session:
+            fitted = await online_calibration.recalibrate(session)
+        write_status(calibration_updated=datetime.now(timezone.utc).isoformat(), calibration_entries=len(fitted))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Online calibration failed")
+        write_status(calibration_error=f"{type(exc).__name__}: {exc}"[:300])
+
+
 async def cap_tick(redis) -> None:
     try:
         await run_cap_cycle(redis)
@@ -141,6 +155,7 @@ async def main(once: bool) -> None:
     sched = AsyncIOScheduler(timezone="UTC")
     sched.add_job(radar_tick, "interval", seconds=settings.poll_seconds, args=[redis, storage],
                   max_instances=1, coalesce=True)
+    sched.add_job(calib_tick, "interval", seconds=3600, max_instances=1, coalesce=True)
     sched.add_job(cap_tick, "interval", seconds=settings.cap_poll_seconds, args=[redis],
                   max_instances=1, coalesce=True)
     from . import lightning
@@ -153,6 +168,7 @@ async def main(once: bool) -> None:
     if settings.regional_enabled:
         sched.add_job(regional_tick, "interval", seconds=settings.poll_seconds, args=[redis, storage],
                       max_instances=1, coalesce=True)
+    await calib_tick()
     sched.start()
     await cap_tick(redis)
     await radar_tick(redis, storage)

@@ -64,7 +64,7 @@ async def main():
     async with SessionLocal() as s:
         await s.execute(text("""INSERT INTO user_subscriptions (endpoint,p256dh,auth,location,alert_types)
             VALUES ('https://push.example/onset-fc','pkey-xxxxxxxxxxxx','auth-xxxx',
-                    ST_SetSRID(ST_MakePoint(10.75,44.5),4326),'{RAIN_START}'),
+                    ST_SetSRID(ST_MakePoint(10.43,44.5),4326),'{RAIN_START}'),
                    ('https://push.example/onset-obs','pkey-xxxxxxxxxxxx','auth-xxxx',
                     ST_SetSRID(ST_MakePoint(10.47,44.5),4326),'{RAIN_START}')"""))
         await s.commit()
