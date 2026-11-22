@@ -4,7 +4,7 @@ import maplibregl, { GeoJSONSource, ImageSource, Map as MlMap } from "maplibre-g
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_URL, getRuntimeConfig } from "@/lib/config";
-import { CAP_EVENTS, EVENT_BY_ID, RADAR_EVENTS } from "@/lib/events";
+import { RADAR_EVENTS } from "@/lib/events";
 import type { Coords } from "@/lib/pushManager";
 
 interface Frame {
@@ -191,27 +191,6 @@ export default function RadarMap({ position, focus }: { position: Coords | null;
           "circle-stroke-color": "#000000",
           "circle-stroke-width": 0.5,
         },
-      });
-      m.on("click", "risk-fill", (e) => {
-        const f = e.features?.[0];
-        if (!f) return;
-        const p = f.properties as Record<string, string | number>;
-        new maplibregl.Popup({ closeButton: false })
-          .setLngLat(e.lngLat)
-          .setHTML(
-            `<b>${EVENT_BY_ID[p.event_type as string]?.label ?? p.event_type}</b><br/>` +
-              `+${p.lead_time_minutes} min (${fmtTime(p.valid_time as string)})<br/>` +
-              (p.prob != null && p.prob !== "" ? `probabilità fino a ${Math.round(Number(p.prob) * 100)}%` : `max ${p.max_dbz} dBZ`),
-          )
-          .addTo(m);
-      });
-      m.on("click", "cap-fill", (e) => {
-        const p = e.features?.[0]?.properties as Record<string, string> | undefined;
-        if (!p) return;
-        new maplibregl.Popup({ closeButton: false })
-          .setLngLat(e.lngLat)
-          .setHTML(`<b>📢 ${CAP_EVENTS.find((c) => c.id === p.event_type)?.label ?? p.event}</b><br/>${p.event}<br/>${p.headline ?? p.area_desc ?? ""}<br/><small>${p.severity}</small>`)
-          .addTo(m);
       });
       setReady(true);
     });
